@@ -18,6 +18,15 @@ readme = "README.md"
 keywords = ["mcp", "proxy", "sandbox", "security"]
 categories = ["command-line-utilities", "development-tools"]
 
+[workspace.dependencies]
+tokio = { version = "1.48", features = ["io-util", "io-std", "macros", "process", "rt-multi-thread", "sync", "time", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+rmcp = { version = "3.8", default-features = false, features = ["client", "server"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

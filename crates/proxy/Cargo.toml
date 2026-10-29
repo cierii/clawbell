@@ -15,5 +15,13 @@ clawbell-audit = { path = "../audit" }
 clawbell-core = { path = "../core" }
 clawbell-sandbox = { path = "../sandbox" }
 
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rmcp.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+
 [lints]
 workspace = true
