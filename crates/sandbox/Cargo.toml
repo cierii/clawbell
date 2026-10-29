@@ -1,0 +1,17 @@
+[package]
+name = "clawbell-sandbox"
+description = "Process isolation and resource controls for clawbell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+clawbell-core = { path = "../core" }
+
+[lints]
+workspace = true
