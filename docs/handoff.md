@@ -1,3 +1,64 @@
+# Handoff — 2026-10-31: transactional regular-file staging
+
+Delivered the scope in ADR 0011, written before code changes: a Linux-only,
+one-shot transaction library with private tmpfs staging, read-only originals,
+network isolation and trusted whole-tree termination before bounded structural
+diff. The default CLI/proxy remains read-only; no host publisher is enabled.
+The ADR specifies the separate approval/conflict/durability/crash migration.
+
+Files: crates/sandbox/src/transaction.rs, native Linux mounting/syscall adapter,
+native attack tests, README and ADR 0011. No dependencies, lockfiles, AGENTS.md,
+policy permissions or packet-path traversal changed. The two pre-existing
+untracked owner documents remain untouched and excluded from the commit.
+
+The owner supplies ReadOnly/Write, never the server's annotation. Source and final
+trees reject links, special nodes, privileged modes and unsupported xattrs;
+SELinux labels are allowed and compared without copying them. Content, type,
+permissions, owner/group, mtime/ctime and labels enter a sorted private diff.
+ReadOnly changes return transaction_hidden_write. Budgets cap regular-file bytes
+at 8 MiB, entries at 4096 and depth at 32. Snapshot/inspection each have ten-second
+deadlines. Late blocking workers discard results; they never execute or publish.
+Originals are never replaced and all candidate trees are discarded.
+
+Verification:
+- Context7 official bubblewrap descriptor-mount/namespace contracts and rustix
+  descriptor-relative no-symlink filesystem documentation consulted.
+- scripts/check-release.sh passed outside the tool's socket restrictions: locked
+  fetch, fmt, all-target Clippy/-D warnings, workspace tests, release build, CLI and
+  policy smoke tests, explicit policy/DLP/monitor/audit latency gates, memory/native
+  lifecycle and SSH probes, installer round-trip and five real CLI attack cases.
+- 4,000 warmed production gate packets: p99 323.062 us, max 624.203 us; native
+  transport 2,000 RTTs: max 270.152 us; full CLI/native/audit/DLP/policy 2,000 RTTs:
+  p99 0.671 ms, max 1.088 ms. All samples <5 ms. These bounded host measurements
+  are not universal real-time or filesystem transaction latency guarantees.
+- After final staging deadline/parent checks: all-target Clippy passed; all eight
+  sandbox unit tests and both mandatory native tests passed with real delegated
+  cgroups. Final locked workspace release build passed.
+- Native transaction tests cover writable private staging, unchanged original
+  synthetic canary, socket and original-write refusal, detached descendants,
+  ReadOnly hidden writes and Write diff. Unit tests cover each metadata/content
+  mutation, create/delete/type, sparse/byte/count/depth limits, link/socket/privilege
+  refusal, unsupported user xattrs and private copy cleanup.
+- Fetched origin refs/tags and scanned all 13 existing commits with gitleaks:
+  no findings. Exact staged content and preserved owner documents were scanned
+  with no findings before commit. Scans do not prove absence of every possible secret or erase forks.
+- Changed documentation links, scope, unsafe adapter contracts and diff whitespace
+  reviewed. AGENTS.md is unchanged at 199 lines. No frontend exists or changed;
+  npm/browser checks are not applicable.
+
+Limits: this is final-state inspection, not a syscall write trace or an atomic
+source snapshot under concurrent owner edits. Atime is excluded. Callers must
+authorize and durably audit before spawn, bound/drain pipes, reap the child and
+withhold output until inspection succeeds. Abrupt crashes/inaccessible directories
+may leave private tmpfs candidates until owner cleanup/reboot. Publication,
+per-operation MCP orchestration and approval/durable recovery remain explicit
+future migration stages, not enabled functionality.
+
+Next step after candidate scan: commit/push and verify remote HEAD. GitHub Actions
+status requires separate remote verification; local checks do not certify CI.
+
+---
+
 # Handoff — 2026-10-31: release security and host diagnostics
 
 Delivered the MIT LICENSE and consistent workspace license metadata, SECURITY.md

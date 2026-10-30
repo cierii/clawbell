@@ -84,6 +84,35 @@ an interrupted install is described in [ADR 0006](docs/adr/0006-mvp-installer-an
 Multiple files are committed independently; earlier files remain protected if a
 later one fails. Test configuration changes in temporary fixtures first.
 
+## Transactional file staging (library boundary)
+
+Linux integrations can use `clawbell_sandbox::transaction::Transaction` for one
+owner-authorized execution. `prepare(NativeConfig, Effect, TreeLimits)` copies a
+bounded tree into a private 0700 tmpfs directory. The upstream sees the originals
+read-only at `/original` and its independent writable copy at `/workspace`, with
+network sockets denied and the existing native cgroup/seccomp limits enforced.
+The defaults and hard ceilings are 8 MiB, 4096 entries and depth 32; snapshot
+and inspection each have a ten-second deadline. Symlinks,
+hardlinks, special files, privileged modes and extended attributes other than the
+host SELinux label refuse. No new dependency is needed.
+
+The caller must durably audit authorization before `spawn`, enforce transport
+budgets and reap the returned child. Consume the transaction with `inspect` before
+releasing results: it kills the entire cgroup, confirms no descendants remain,
+then returns a sorted structural diff. Content, type, permissions, ownership,
+modification/change timestamps and SELinux label changes are compared. ReadOnly
+with a changed workspace returns `transaction_hidden_write`. Reports contain
+private untrusted paths, never raw content; redact them before crossing a trust
+boundary. Copying and scanning run on blocking workers, outside the packet path.
+
+This is an isolated staging/inspection API, with no host publisher or CLI write
+mode. All candidates are discarded. It is not an atomic snapshot of concurrently
+edited source files or a syscall write trace; atime-only reads are intentionally
+ignored. Failed/cancelled operations never publish. Abrupt crashes or inaccessible
+staged directories can leave private tmpfs leftovers for owner cleanup/reboot.
+See [ADR 0011](docs/adr/0011-transactional-file-staging.md) for the publication,
+approval, conflict and crash-recovery migration plan.
+
 ## Inspect downloaded skills before use
 
 Unpack the package yourself without executing it, then run:

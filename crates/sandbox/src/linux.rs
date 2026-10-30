@@ -53,6 +53,7 @@ impl Drop for Group {
 pub struct LinuxRunner {
     config: NativeConfig,
     workspace: File,
+    staging: Option<File>,
     group: Arc<Group>,
     watchdog: Option<JoinHandle<()>>,
     started: bool,
@@ -135,6 +136,7 @@ impl LinuxRunner {
             Ok(Self {
                 config,
                 workspace,
+                staging: None,
                 group: Arc::new(Group { directory, kill }),
                 watchdog: None,
                 started: false,
@@ -144,6 +146,17 @@ impl LinuxRunner {
             let _ = fs::remove_dir(setup);
         }
         result
+    }
+}
+impl LinuxRunner {
+    pub(crate) fn workspace_handle(&self) -> Result<File, LaunchError> {
+        self.workspace
+            .try_clone()
+            .map_err(|_| LaunchError::DescriptorUnavailable)
+    }
+    pub(crate) fn with_staging(mut self, staging: File) -> Self {
+        self.staging = Some(staging);
+        self
     }
 }
 impl Runner for LinuxRunner {
@@ -184,33 +197,36 @@ impl Runner for LinuxRunner {
                 command.args(["--ro-bind", path, path]);
             }
         }
+        command.args([
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--size",
+            "16777216",
+            "--tmpfs",
+            "/tmp",
+            "--dir",
+            "/home/sandbox",
+            "--setenv",
+            "HOME",
+            "/home/sandbox",
+            "--setenv",
+            "PATH",
+            "/usr/bin",
+            "--ro-bind-fd",
+            "3",
+            if self.staging.is_some() {
+                "/original"
+            } else {
+                "/workspace"
+            },
+        ]);
+        if self.staging.is_some() {
+            command.args(["--bind-fd", "5", "/workspace"]);
+        }
         command
-            .args([
-                "--proc",
-                "/proc",
-                "--dev",
-                "/dev",
-                "--size",
-                "16777216",
-                "--tmpfs",
-                "/tmp",
-                "--dir",
-                "/home/sandbox",
-                "--setenv",
-                "HOME",
-                "/home/sandbox",
-                "--setenv",
-                "PATH",
-                "/usr/bin",
-                "--ro-bind-fd",
-                "3",
-                "/workspace",
-                "--chdir",
-                "/workspace",
-                "--seccomp",
-                "4",
-                "--",
-            ])
+            .args(["--chdir", "/workspace", "--seccomp", "4", "--"])
             .arg(&self.config.executable)
             .args(&self.config.arguments);
         sys::setup(
@@ -218,6 +234,11 @@ impl Runner for LinuxRunner {
             sys::high_fd(&self.workspace).map_err(|_| LaunchError::DescriptorUnavailable)?,
             sys::high_fd(&filter).map_err(|_| LaunchError::DescriptorUnavailable)?,
             sys::high_fd(&membership).map_err(|_| LaunchError::DescriptorUnavailable)?,
+            self.staging
+                .as_ref()
+                .map(sys::high_fd)
+                .transpose()
+                .map_err(|_| LaunchError::DescriptorUnavailable)?,
         );
         let child = Command::from(command)
             .kill_on_drop(true)

@@ -88,3 +88,6 @@ pub mod native;
 mod seccomp;
 #[cfg(target_os = "linux")]
 mod sys;
+
+#[cfg(target_os = "linux")]
+pub mod transaction;

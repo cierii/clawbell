@@ -135,3 +135,100 @@ async fn malicious_mcp_cannot_read_ssh_key() -> Result {
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+/// Transactional staging is exercised on the same mandatory native release host.
+#[tokio::test]
+#[ignore = "requires real Linux namespace and cgroup v2 delegation"]
+async fn transaction_stops_descendants_and_refuses_hidden_writes() -> Result {
+    use clawbell_sandbox::transaction::{
+        ChangeKind, Effect, Transaction, TransactionError, TreeLimits,
+    };
+    let parent = PathBuf::from(std::env::var("CLAWBELL_TEST_CGROUP")?);
+    let root = std::env::temp_dir().join(format!(
+        "clawbell-transaction-native-{}",
+        std::process::id()
+    ));
+    fs::create_dir(&root)?;
+    fs::write(root.join("canary"), b"SYNTHETIC-TRANSACTION-CANARY")?;
+    for (effect, mutate) in [
+        (Effect::ReadOnly, false),
+        (Effect::ReadOnly, true),
+        (Effect::Write, true),
+    ] {
+        let script = r"import os,socket,time,sys
+assert open('/workspace/canary').read() == 'SYNTHETIC-TRANSACTION-CANARY'
+try: open('/original/canary','w')
+except OSError: pass
+else: raise RuntimeError('original writable')
+for family in (socket.AF_INET,socket.AF_UNIX):
+    try: socket.socket(family)
+    except OSError: pass
+    else: raise RuntimeError('network enabled')
+if sys.argv[1] == 'write':
+    open('/workspace/canary','w').write('changed')
+    open('/workspace/created','w').write('new')
+pid=os.fork()
+if pid == 0:
+    os.setsid()
+    print('ready',flush=True)
+    while True: time.sleep(1)
+print('ready',flush=True)
+time.sleep(60)
+";
+        let settings = config(
+            root.clone(),
+            parent.clone(),
+            vec![
+                "-B".into(),
+                "-c".into(),
+                script.into(),
+                if mutate {
+                    "write".into()
+                } else {
+                    "read".into()
+                },
+            ],
+        );
+        let mut transaction = Transaction::prepare(settings, effect, TreeLimits::default()).await?;
+        let mut child = transaction.spawn().await?;
+        let mut lines = BufReader::new(child.stdout.take().ok_or("missing stdout")?).lines();
+        for _ in 0..2 {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                    .await??
+                    .as_deref(),
+                Some("ready")
+            );
+        }
+        let inspected = transaction.inspect().await;
+        tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
+        if effect == Effect::ReadOnly && mutate {
+            assert!(matches!(inspected, Err(TransactionError::HiddenWrite)));
+        } else {
+            let changes = inspected?;
+            if mutate {
+                assert!(
+                    changes
+                        .iter()
+                        .any(|c| c.path == std::path::Path::new("canary")
+                            && c.kind == ChangeKind::Modified)
+                );
+                assert!(
+                    changes
+                        .iter()
+                        .any(|c| c.path == std::path::Path::new("created")
+                            && c.kind == ChangeKind::Created)
+                );
+            } else {
+                assert!(changes.is_empty());
+            }
+        }
+        assert_eq!(
+            fs::read(root.join("canary"))?,
+            b"SYNTHETIC-TRANSACTION-CANARY"
+        );
+        assert!(!root.join("created").exists());
+    }
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
