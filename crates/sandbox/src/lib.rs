@@ -24,3 +24,6 @@ pub trait Runner: Send {
 #[derive(Debug, thiserror::Error)]
 #[error("required_process_isolation_unavailable")]
 pub struct LaunchError;
+
+#[cfg(unix)]
+pub mod memory;

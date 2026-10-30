@@ -31,3 +31,12 @@
 *.pfx
 id_rsa
 id_ed25519
+
+# SQLite rollback journals and alternate database suffixes
+*.db-journal
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm

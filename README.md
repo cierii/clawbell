@@ -1,74 +1,134 @@
 # clawbell
 
-Lokalny rdzeń proxy MCP w Rust (edition 2024, Tokio). Transporty przekazują
-komunikaty przez obowiązkowy adapter kontroli bezpieczeństwa. Projekt jest na
-etapie biblioteki transportowej; binarka `clawbell` pozostaje pustym scaffoldingiem.
+A local Rust MCP proxy core with declarative policy evaluation, persistent tool
+catalog pins, agent-memory protection and session-scoped DLP. Linux is the first
+filesystem enforcement platform. The CLI is still a scaffold: these are library
+components, not a complete deployable firewall.
 
-Dostępne API:
+## Policy evaluation
 
-- `clawbell_proxy::stdio::run`: asynchroniczny menadżer procesu MCP. Uruchamia
-  serwer przez `clawbell_sandbox::Runner`, obsługuje osobne zadania odczytu/zapisu,
-  drenuje i odrzuca stderr z limitem, kończy i zbiera proces po zakończeniu sesji.
-- `clawbell_proxy::stdio::relay`: pompa dwóch już połączonych transportów STDIO.
-- `clawbell_proxy::http::relay`: klient STDIO → zdalny, bezstanowy endpoint
-  Streamable HTTP. Każda wiadomość jest osobnym POST; odpowiedź może być JSON
-  albo skończonym SSE z powiadomieniami i skorelowaną odpowiedzią.
-- `clawbell_proxy::protocol`: walidacja JSON-RPC 2.0 i schematów MCP przez adapter
-  oficjalnego SDK `rmcp`; fazy `New`, `Initializing`, `AwaitingInitialized`,
-  `Ready`, `Closed`, osobne przestrzenie ID oraz terminy żądań w obu kierunkach.
+`clawbell_core::policy::Policy::parse` loads strict TOML and compiles bounded
+regular expressions once. [policies/default.toml](policies/default.toml) is the
+owner configuration example. Each tool has an exact name, an effect (`read`,
+`write`, `opaque`) and JSON Pointer selectors for its file paths. Server-provided
+annotations never determine effects or permissions.
 
-Każdy kierunek podlega kontroli `Gate`, również powiadomienia, resources, prompts,
-sampling i elicitation. Nie ma domyślnej implementacji przepuszczającej ruch.
-`Gate` musi dostarczyć niezmienny snapshot polityki, przypięcie tożsamości i
-schematów narzędzi, kontrolę argumentów i sekretów oraz trwały audyt przed
-wykonaniem. `finish` zapisuje zakończenie i nieznane wyniki. Przerwane zamiary
-muszą pozostać w audycie jako nieznane również po anulowaniu całej future.
-Transport sam nie implementuje tych mechanizmów.
+Rules match an exact tool name (or `*`), an optional component-bounded
+`path_prefix`, and an optional `arguments_regex` over compact JSON arguments.
+All supplied selectors must resolve to strings, and all selected paths must match
+when a rule has a prefix. Paths are workspace-relative POSIX paths; absolute
+paths, parent traversal, NUL, backslash and colon are refused. This lexical
+validation does not resolve symlinks and cannot replace filesystem containment.
 
-`Runner` jest granicą zaufanego mechanizmu izolacji. Implementacja musi sprawdzić
-bubblewrap, seccomp i cgroups v2, ograniczyć środowisko, mounty, sieć i zasoby oraz
-zapewnić sprzątanie całego drzewa także przy porzuceniu future. Brak konkretnego
-runnera uniemożliwia produkcyjne uruchomienie lokalnego serwera. Implementacje
-polityki, SQLite i sandboxa wymagają kolejnego etapu; testowe adaptery są wyłącznie
-syntetycznymi fixtures. Nie stanowią gotowego firewalla.
+Evaluation returns `allow`, `deny` or `require_approval`, with a stable reason
+code. Deny overrides approval, which overrides allow; unmatched operations deny.
+Unknown effects, tools, fields and invalid regexes fail closed. An immutable
+snapshot is held through each session. To reload, parse a replacement first and
+install it only after success; existing sessions retain their original snapshot.
 
-## Transport i ograniczenia
+`require_approval` requests owner interaction and remains blocked by `PolicyGate`.
+There is no approval issuance/redemption API or interactive approval UI yet;
+no approval can bypass memory protection, schema validation or a deny rule.
+Opaque commands, shells and recursive filesystem mutations are refused, even
+with an allow rule: regexes cannot establish their effects.
 
-STDIO używa pojedynczego JSON na linię, bez nagłówków Content-Length. Rozmiar
-linii jest ograniczony podczas odczytu, przed alokacją całej wiadomości.
-Czytniki i pisarze pracują niezależnie; kolejki są ograniczone i przeciążenie
-zamyka sesję. Domyślnie: 1 MiB, 32 wiadomości na kolejkę, 32 oczekujące żądania
-na kierunek i 30 s na I/O, kontrolę lub oczekiwanie bez postępu. Maksymalnie
-65 536 unikalnych ID na kierunek; ID nie mogą być ponownie użyte. JSON odrzuca
-zduplikowane klucze, nadmierne zagnieżdżenie, batch, null/fractional IDs i nieznane
-metody. Obsługiwane wersje: 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25.
-Nieznane rozszerzenia wymagają świadomej rozbudowy adaptera.
+## Tool catalog baseline and rug-pull protection
 
-HTTP wymaga HTTPS; wyjątek HTTP dotyczy wyłącznie konkretnego adresu loopback
-wskazanego przez właściciela. DNS jest rozwiązywany raz i przypinany do
-zweryfikowanych adresów, bez środowiskowego proxy, przekierowań i ponowień.
-Prywatne cele wymagają wyjątku dla dokładnego IP i endpointu; link-local,
-metadata i adresy IPv4 mapowane w IPv6 są odrzucane. Dane logowania w URL,
-query i fragment są niedozwolone. Nie ma jeszcze adaptera poświadczeń upstreamu.
+`clawbell_audit::baseline::BaselineStore` owns a bounded, dedicated SQLite writer
+thread. Open it in an existing, trusted owner-private directory (0700). The
+SQLite file is created with 0600; symlinks and group/world permissions are refused.
+Keep the directory and its ancestors inaccessible to untrusted processes, and
+never mount this directory inside a child sandbox.
 
-Adapter HTTP jest bezstanowy: nie obsługuje `Mcp-Session-Id`, GET, wznawiania SSE,
-legacy HTTP+SSE ani interaktywnych żądań serwer → klient w SSE. Te przypadki są
-odrzucane. Cała skończona odpowiedź HTTP jest buforowana z limitem przed
-inspekcją; strumień nie może pozostać otwarty bez końca. Klient musi uwzględniać
-te ograniczenia przy wyborze upstreamu. Nie deklarujemy zgodności z każdym
-istniejącym serwerem ani uniwersalnej gwarancji opóźnienia.
+`clawbell_proxy::policy::PolicyGate` decorates a required inner `Gate`. Bind its
+server identity to owner configuration (endpoint/command and identity), never to
+an upstream's self-reported name. Each instance belongs to one session. On the
+first complete `tools/list`, it durably pins a domain-separated SHA-256 digest of
+the name-sorted catalog, alongside SHA-256 signatures of each complete tool
+definition. Each tool's name, JSON input schema, description and all
+other metadata contribute to the digest. Object key order and tool list order
+are insignificant; array order and metadata content remain significant. No raw
+descriptions or arguments are stored in the baseline database.
 
-Lokalne `notifications/cancelled` zamyka sesję i uruchamia teardown runnera;
-zdalne jest przekazywane przez POST, bez obietnicy cofnięcia skutków. EOF,
-niepoprawny protokół, odmowa lub timeout zamykają całą sesję. Wiadomości nadal
-oczekujące w kolejkach mogą zostać odrzucone; niezakończone operacje mają wynik
-nieznany. Transport nie wypisuje surowych błędów, payloadów ani stderr upstreamu.
+A later catalog must match exactly, including additions/removals. A mismatch
+blocks communication and never overwrites the pin. A `tools/list_changed`
+notification immediately closes the guarded session; reconnecting requires
+fetching and checking the complete catalog. Calls before a validated catalog,
+paginated catalogs, duplicate names and invalid schemas are refused. Schemas
+compile offline with a bounded linear-time regex engine; external references
+cannot fetch network or local files. Tool arguments are checked against pinned
+schemas on every call. Inner adapters cannot change checked calls or catalogs.
 
-## Weryfikacja
+The first observation uses trust on first use (TOFU). It cannot prove that the
+initial tool is safe, detect server code changes with identical metadata, or
+isolate a remote server's filesystem. Owners must review initial servers and
+explicitly plan a baseline migration for legitimate tool upgrades. There is no
+automatic reset/re-pin command. A failure is terminal for that session.
 
-Wymagany jest przypięty toolchain z `rust-toolchain.toml`. Test procesu korzysta
-z `/usr/bin/python3` i stałego syntetycznego serwera; testy HTTP wymagają bind na
-loopbacku. Nie łączą się z publicznymi usługami i nie pobierają serwerów MCP.
+## Agent memory guard
+
+Write effects targeting `SOUL.md`, `CLAUDE.md`, `AGENTS.md`, `.cursorrules`, or
+`skills`, `.skills` and `skillks` path components are denied before forwarding,
+regardless of allow rules. Matching is ASCII case-insensitive and also covers
+new files and nested agent-specific skill directories. Owner tool bindings must
+accurately list every affected file path; arbitrary server behavior cannot be
+inferred from tool arguments.
+
+`clawbell_sandbox::memory::MemoryGuard` supplies the filesystem containment part
+of a Linux Runner. It pins the workspace using an open directory handle and
+prepares bubblewrap with read-only workspace and runtime mounts, a private
+volatile `/tmp`, isolated namespaces, dropped capabilities, an empty environment,
+and disabled nested user namespaces. There are no writable host mounts. This
+conservative profile prevents persistent writes through symlinks, hardlinks,
+rename/unlink, newly created files and descendant processes. It protects the
+whole mounted workspace, rather than watching filenames after a write occurs.
+
+`prepare` **does not launch a process** and is not a complete `Runner`. The
+composition root must also install seccomp, cgroups v2 resource limits and tree
+supervision before spawning. Do not add a writable host mount: that invalidates
+this profile's guarantee. The setup handle uses stdin; a fixed exec shim replaces
+it with `/dev/null` before the owner-authorized program starts. This component is
+for skills without stdin; an MCP Runner must arrange a separate inherited handle
+for mount setup. Shell authorization is separate. No insecure launcher or
+production allow-all gate is provided. Processes started outside a controlled
+runner and remote MCP processes remain outside filesystem enforcement.
+
+## Transport and DLP integration
+
+- `stdio::run` requires a trusted `Runner`; `stdio::relay` connects existing I/O.
+- `http::relay` supports a stateless HTTPS upstream (or an explicit exact loopback
+  exception), pinned DNS, no redirects/retries/environment proxies and bounded
+  complete JSON/SSE responses. Stateful HTTP, GET/resume and reverse requests in
+  SSE remain unsupported and are refused.
+- `protocol` validates JSON-RPC/MCP through `rmcp`, lifecycle, correlation,
+  initialization order, duplicate keys, depth, supported methods and versions.
+  Queues, messages, IDs, deadlines and concurrent requests are bounded.
+- Every direction crosses `Gate`, including resources, prompts, notifications,
+  sampling and elicitation. The inner adapter must still authorize those methods,
+  redact secrets and durably record intent before execution and outcomes after it.
+  Baseline storage is not an operation audit log.
+
+For local token restoration use `LocalVaultGate<PolicyGate<AuditGate>>`. The
+outer DLP layer redacts before audit, restores only explicitly authorized local
+tool arguments, then calls `validate_local_arguments` on the policy layer to
+recheck actual arguments against memory rules, policy and pinned schemas. The
+inner audit adapter must also implement this validation; its default denies.
+Remote transports reject local restoration. Fresh vaults are required per session.
+`Scanner` buffers the whole bounded UTF-8 inspection unit, including secrets split
+across fragments; `Vault` encrypts registered values and maintains opaque session
+markers. See [ADR 0002](docs/adr/0002-in-flight-dlp.md) for limits and migration.
+
+Transport denial, invalid protocol, EOF, timeout and local cancellation close the
+session. Runner teardown must terminate descendants; remote cancellation cannot
+undo side effects. Unknown outcomes are never automatically retried. Raw payloads,
+upstream stderr and secrets must not appear in diagnostics or exported audit data.
+
+## Verification
+
+Use the pinned toolchain in `rust-toolchain.toml`. Tests use synthetic data only;
+HTTP fixtures need permission to bind loopback. The explicit Linux test requires
+bubblewrap and usable user/mount/network namespaces; unavailable isolation is a
+failure, never a successful skip inside the test.
 
 ```bash
 cargo fetch --locked
@@ -76,43 +136,30 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked --no-fail-fast
 cargo build --workspace --release --locked
-cargo test -p clawbell-proxy --release --locked latency_under_three_ms -- --ignored --nocapture
+cargo test -p clawbell-sandbox --locked child_cannot_modify_agent_memory -- --ignored --nocapture
+cargo test -p clawbell-proxy --release --locked policy_packet_under_five_ms -- --ignored --nocapture
 ```
 
-Ostatnie polecenie to jawny eksperyment wydajnościowy: 200 rozgrzewających i 2000
-mierzonych round-tripów `ping`, 2 wątki Tokio, porównanie bezpośredniego połączenia
-z proxy przez pamięciowe strumienie z backpressure. Wypisuje percentyle i sprawdza
-różnicę p99 poniżej 3 ms. Testowy gate nie wykonuje trwałego zapisu: wynik nie
-obejmuje SQLite, sandboxa, procesu ani sieci i nie potwierdza warunku <3 ms dla
-pełnej konfiguracji produkcyjnej. Pomiar nie stanowi górnej granicy pojedynczej
-operacji na dowolnym hoście.
+The attack tests deliver a delayed instruction to append to `SOUL.md`, require a
+proxy refusal before the inner adapter sees the call, and separately exercise
+real child/grandchild writes, aliases, replacements and new protected files in
+bubblewrap. Persistent contents must remain unchanged. Other tests cover durable
+rug-pull detection across reopened SQLite connections, failure recovery, invalid
+schema/storage, protected paths and decision precedence.
 
-Specyfikacje: [transporty MCP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
-[cykl życia](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle),
-[oficjalny SDK rmcp](https://github.com/modelcontextprotocol/rust-sdk).
+The policy experiment warms 200 calls, then measures 2000 packets through policy
+and pinned-schema validation, reporting p99 and maximum and requiring every
+measured packet below 5 ms. Catalog compilation, initial SQLite persistence,
+durable operation audit, DLP, process startup and network I/O are excluded. This
+is a reproducible scoped measurement, not a universal 5 ms bound for the complete
+proxy or every packet size. Existing DLP and transport experiments remain in their
+respective test files. Full production latency requires the completed composition.
 
-## In-Flight DLP Vault
+The repository ignores runtime databases, `.local/`, `.env` and private-key
+material. Fixtures contain synthetic values. Secret scanning can detect known
+patterns; it does not prove the absence of every secret or cover remote forks.
 
-`clawbell_core::dlp::{Vault, Scanner}` udostępniają ograniczoną redakcję UTF-8
-oraz szyfrowany skarbiec sesji. `Scanner::push` przyjmuje dowolne fragmenty,
-a `finish` zwraca wyłącznie wynik po inspekcji. `Vault::register` pozwala jawnie
-zarejestrować sekrety nierozpoznawane przez wzorce. Wzorce obejmują PEM, SSH,
-wybrane klucze API, URI baz danych i wartości credential w .env.
-
-`clawbell_proxy::dlp::LocalVaultGate` składa DLP z istniejącym Gate dla jednego
-lokalnego upstreamu. Właściciel przekazuje listę narzędzi uprawnionych do używania
-znaczników. Gate musi zaimplementować `validate_local_arguments` i sprawdzić
-odtworzone argumenty względem przypiętych schematów i polityki, bez logowania
-sekretów; domyślna implementacja odmawia. Audyt otrzymuje znaczniki. Adapter HTTP
-odrzuca LocalVaultGate. Po zakończeniu sesji vault jest usuwany.
-
-Test `.env` znajduje się w `crates/proxy/tests/transports.rs`. Eksperyment DLP:
-
-```bash
-cargo test -p clawbell-core --release --locked dlp_packet_under_five_ms -- --ignored --nocapture
-```
-
-Mierzy rozgrzaną inspekcję i odtwarzanie 2274 bajtów w fragmentach, z 64
-zarejestrowanymi sekretami, bez audytu, procesu i sieci. Nie stanowi
-gwarancji <5 ms pełnego proxy ani dowolnej wielkości pakietu. Ograniczenia pamięci,
-heurystyk i migrację opisuje [ADR 0002](docs/adr/0002-in-flight-dlp.md).
+Technical contracts: [MCP transport specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
+[rmcp](https://github.com/modelcontextprotocol/rust-sdk),
+[bubblewrap](https://github.com/containers/bubblewrap),
+[ADR 0003](docs/adr/0003-policy-baseline-memory.md).

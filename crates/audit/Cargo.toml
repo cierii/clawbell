@@ -13,5 +13,9 @@ categories.workspace = true
 [dependencies]
 clawbell-core = { path = "../core" }
 
+rusqlite = { version = "0.40", features = ["bundled"] }
+tokio.workspace = true
+thiserror.workspace = true
+
 [lints]
 workspace = true

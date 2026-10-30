@@ -17,6 +17,8 @@
 
 pub mod dlp;
 pub mod http;
+#[cfg(unix)]
+pub mod policy;
 pub mod protocol;
 pub mod stdio;
 mod strict_json;

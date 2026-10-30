@@ -1,0 +1,31 @@
+# Owner configuration, not tool-provided annotations. No implicit permission.
+version = "1"
+
+[[tools]]
+name = "read_file"
+effect = "read"
+paths = ["/path"]
+
+[[tools]]
+name = "write_file"
+effect = "write"
+paths = ["/path"]
+
+[[tools]]
+name = "shell"
+effect = "opaque"
+
+[[rules]]
+tool = "read_file"
+path_prefix = "workspace"
+decision = "allow"
+
+[[rules]]
+tool = "write_file"
+path_prefix = "workspace/output"
+decision = "require_approval"
+
+[[rules]]
+tool = "*"
+arguments_regex = '(?i)exfiltrate|disable_guard'
+decision = "deny"

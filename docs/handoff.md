@@ -1,55 +1,89 @@
-# Punkt wznowienia — 2026-10-30
+# Handoff — 2026-10-30
 
-## Cel i wynik
+## Objective and result
 
-Zlecenie: In-Flight DLP Vault, dwukierunkowe znaczniki, test .env, kontrola
-sekretów repozytorium, commit i push. Dostarczono komponenty biblioteczne
-zintegrowane z istniejącą granicą Gate. CLI nadal jest scaffoldingiem; brak
-produkcyjnego Gate z SQLite i Linux Runnera z poprzedniego etapu.
+Implement declarative policy evaluation, persistent MCP rug-pull pins and agent
+memory protection; block a delayed SOUL.md injection, check repository secrets,
+commit and push. Delivered library components integrated with the existing Gate
+boundary. The CLI remains a scaffold; no permissive gate or incomplete Runner is
+exposed as a deployable firewall.
 
-## Zmiany
+## Changes
 
-- core/dlp.rs: ograniczony skaner fragmentów UTF-8, wzorce PEM/API/SSH/URI baz/
-  credential assignments, jawna rejestracja, stabilne losowe znaczniki sesji,
-  skarbiec XChaCha20-Poly1305 z kluczem SecretBox i zerowanymi buforami.
-- proxy/dlp.rs: redakcja przed wewnętrznym audytem, odmowa surowych sekretów,
-  odtwarzanie tylko w argumentach jawnie dozwolonego lokalnego narzędzia.
-- Gate::validate_local_arguments: osobna walidacja rzeczywistych argumentów;
-  domyślnie deny. HTTP odrzuca LocalVaultGate. finish usuwa vault.
-- Testy .env przez rzeczywisty relay z fragmentacją wire, dwukierunkowe
-  odtwarzanie oraz odmowy obcych tokenów, narzędzi i zakończonych sesji.
-- ADR 0002 i celowana aktualizacja konstytucji dokumentują zamówiony wyjątek
-  od zakazu odtwarzania sekretów z tekstu narzędzia. AGENTS.md nadal 199 linii.
-- Nowe zależności: RustCrypto AEAD zamiast własnej kryptografii, systemowe
-  getrandom, regex do heurystyk, secrecy/zeroize do ograniczania kopii sekretów.
-- .gitignore rozszerzony o materiały kluczy prywatnych; fixtures syntetyczne.
+- core/policy.rs: strict bounded TOML, owner-defined tool effects and JSON Pointer
+  file selectors, component-bounded path prefixes, precompiled bounded argument
+  regexes; default deny, deny > approval > allow and static reason codes.
+  Unknown/opaque effects are denied. Immutable session snapshot via Arc.
+- core/signatures.rs: domain-separated SHA-256 of canonical tool metadata,
+  individual tool signatures and a name-sorted complete catalog digest. Detects
+  descriptions, schemas, names, other metadata and additions/removals.
+- audit/baseline.rs: bounded dedicated SQLite writer thread, FULL synchronous
+  transactions, 0700 storage directory / 0600 file, no raw tool metadata, TOFU
+  once and no overwrite on mismatch. Owner must protect directory ancestors.
+- proxy/policy.rs: mandatory decorator over an existing trusted Gate. Full catalog
+  required before calls; offline pinned JSON Schema validation with bounded Rust
+  regex engine. Notifications close sessions immediately. Approval remains blocked.
+  Checked calls/catalogs cannot be changed by inner adapters; resolved DLP arguments
+  pass through the same policy/schema checks. Non-tool authorization and durable
+  operation audit remain the inner Gate's obligations.
+- sandbox/memory.rs: an open directory handle pins a read-only bubblewrap workspace.
+  All persistent mounts are read-only; scratch is private volatile storage. The
+  profile isolates namespaces, drops capabilities, clears env and disables nested
+  user namespaces. A fixed exec shim replaces the directory stdin with /dev/null;
+  arguments are positional, never interpolated into shell code.
+- policies/default.toml, English README and ADR 0003 document exact behavior,
+  integration and limits. AGENTS.md remains unchanged at 199 lines. .gitignore
+  also covers SQLite rollback journals and sidecars.
+- New dependencies implement requested functions: toml for declarative parsing,
+  RustCrypto sha2 for standard hashing, rusqlite/bundled SQLite for local durable
+  pins and jsonschema (network/file retrieval features disabled) for pinned schema
+  validation. Cargo.lock records the intentional dependency additions.
 
-## Kontrole
+## Verification
 
-fmt, clippy --workspace --all-targets --locked z -D warnings, pełne testy
-workspace i build release przeszły. Testy: 16 zwykłych testów oraz 1 rustdoc;
-dwa eksperymenty są domyślnie ignored. Nowy eksperyment uruchomiono osobno.
-Release DLP: 200 rozgrzewających i 2000 mierzonych jednostek po 2274 bajty,
-64 zarejestrowane sekrety, fragmentacja co 97 bajtów, redakcja i odtwarzanie:
-p99 259.572 µs, max 709.835 µs. Wynik poniżej 5 ms dotyczy wyłącznie tego
-obciążenia i hosta; nie jest gwarancją pełnego proxy z trwałym audytem.
+Passed fmt, clippy --workspace --all-targets --locked with -D warnings, full
+workspace tests and release build. Full workspace: 26 ordinary tests and one
+rustdoc, four explicit tests/experiments ignored by default. HTTP fixtures require
+loopback permission outside this environment's sandbox; rerunning the full suite
+with that permission passed. The earlier restricted run failed only TCP binds.
 
-Gitleaks 8.30.1 (archiwum ze zweryfikowaną sumą SHA256): historia wszystkich
-lokalnych refs (3 wcześniejsze commity) i kopia plików przeznaczonych do commitu
-bez wykrytych wycieków. Początkowe wskazanie dotyczyło syntetycznego PEM w teście;
-fixture składa teraz nagłówek z fragmentów bez wyłączania reguł skanera.
-Skanery nie dowodzą nieobecności każdego sekretu i nie obejmują cudzych forków.
+Explicit bubblewrap test passed on this Linux host. Delayed injection cannot
+append to SOUL.md; it also checks new CLAUDE.md/AGENTS.md/.cursorrules and skill
+files, symlinks/hardlinks, unlink/rename and a grandchild write. The workspace is
+renamed after opening the handle to verify that its identity stays pinned. The
+file remains unchanged. The test fails if required host isolation is unavailable.
+A separate proxy test rejects delayed append before the inner adapter sees it.
+Rug-pull tests reopen SQLite and verify changes, notification closure, unchanged
+pins after refusal, additions/removals, schema changes and separate server identity.
 
-Toolchain 1.99.1 zainstalowany w /tmp/clawbell-rustup i /tmp/clawbell-cargo;
-komendy wymagają odpowiednich RUSTUP_HOME/CARGO_HOME. Testy TCP wymagają
-uprawnień poza sandboxem środowiska. UI/serve/policy check nie uruchamiano,
-ponieważ nie mają implementacji i nie należą do tej zmiany.
+Explicit release policy/schema experiment: 200 warmups, 2000 measured packets;
+p99 1.834 microseconds, maximum 10.691 microseconds, every measured packet <5 ms.
+This excludes catalog compilation and first pin, operation audit fsync, DLP,
+process startup and network I/O. It does NOT establish a hard bound for the full
+production proxy, arbitrary schemas, packet sizes or scheduling conditions.
 
-## Ograniczenia i następny krok
+Gitleaks 8.30.1 scanned all fetched Git refs (four existing commits) with no leaks
+found. The final 38-file candidate snapshot was scanned separately with no leaks found. No actual
+credentials were added; test strings are synthetic. Secret scanning cannot prove
+absence of all possible secrets or inspect remote forks.
 
-DLP obejmuje obsługiwany tekst UTF-8, nie dowolne kodowanie czy załączniki
-binarne. Vault nie blokuje swapu i nie chroni przed przejęciem procesu;
-tymczasowe serde/transport plaintext copies nie mają gwarancji zerowania.
-Composition root musi przypisać nowy vault każdej sesji jednego upstreamu,
-zapewnić trwały audyt, przypięte schematy i izolowany Runner. Nie wprowadzać
-permissive fallbacku. Pełna gwarancja wydajności wymaga pomiaru tej kompozycji.
+## Remaining integration boundaries
+
+MemoryGuard prepares a filesystem profile; it does not start a process and is
+not a complete Runner. The composition root must still supply seccomp, cgroups v2,
+resource limits and process-tree supervision. Its setup handle occupies stdin;
+a future MCP Runner needs a separate inherited fd. Adding writable host mounts
+invalidates this conservative memory guarantee and needs a reviewed design.
+
+Use LocalVaultGate<PolicyGate<AuditGate>> for local restoration, a fresh instance
+per session/upstream, an owner-bound server identity, and a trusted private
+baseline directory outside sandbox mounts. An approval UI/redemption flow is not
+implemented, so require_approval always blocks execution. TOFU cannot attest to
+initial safety or server code changes with unchanged metadata. Remote processes
+and skills launched outside a controlled Runner remain outside filesystem
+containment. No UI/serve CLI checks were claimed: those components do not exist.
+
+Toolchain/cache for this environment: RUSTUP_HOME=/tmp/clawbell-rustup,
+CARGO_HOME=/tmp/clawbell-cargo, /tmp/clawbell-cargo/bin/cargo. A complete Linux
+Runner and durable operation audit composition remain prerequisites for a
+production launch; do not bypass the mandatory adapter boundary.
