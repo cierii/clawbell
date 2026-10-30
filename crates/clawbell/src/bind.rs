@@ -1,5 +1,6 @@
 //! Reversible JSON MCP client binding. Configurations are data, never commands
 //! to execute during discovery. A private original backup is never overwritten.
+use crate::errors::Code;
 use crate::files::{self, Result};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -41,36 +42,38 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 fn text(path: &Path) -> Result<&str> {
-    path.to_str().ok_or_else(|| "non_utf8_path".into())
+    path.to_str().ok_or_else(|| Code("non_utf8_path").into())
 }
 fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8>> {
     let mut config: Value = clawbell_core::json::parse(original)?;
     let object = config
         .as_object_mut()
-        .ok_or("configuration_object_required")?;
+        .ok_or(Code("configuration_object_required"))?;
     // Ambiguous formats are refused instead of leaving an unguarded second map.
     if object.contains_key("mcpServers") && object.contains_key("servers") {
-        return Err("ambiguous_configuration".into());
+        return Err(Code("ambiguous_configuration").into());
     }
     let key = if object.contains_key("mcpServers") {
         "mcpServers"
     } else {
         "servers"
     };
-    let servers = object.get_mut(key).ok_or("unsupported_configuration")?;
-    let servers = servers.as_object_mut().ok_or("invalid_server_map")?;
+    let servers = object
+        .get_mut(key)
+        .ok_or(Code("unsupported_configuration"))?;
+    let servers = servers.as_object_mut().ok_or(Code("invalid_server_map"))?;
     if servers.is_empty() || servers.len() > 256 {
-        return Err("invalid_server_count".into());
+        return Err(Code("invalid_server_count").into());
     }
     for (name, server) in servers {
-        let entry = server.as_object_mut().ok_or("invalid_server")?;
+        let entry = server.as_object_mut().ok_or(Code("invalid_server"))?;
         let command = entry
             .get("command")
             .and_then(Value::as_str)
-            .ok_or("stdio_command_required")?
+            .ok_or(Code("stdio_command_required"))?
             .to_owned();
         if !command.starts_with("/usr/bin/") || command.contains("/../") {
-            return Err("absolute_usr_bin_command_required".into());
+            return Err(Code("absolute_usr_bin_command_required").into());
         }
         if entry.contains_key("url")
             || entry.contains_key("envFile")
@@ -80,23 +83,27 @@ fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8
                 .is_some_and(|v| v.as_object().is_none_or(|m| !m.is_empty()))
             || entry.get("type").is_some_and(|v| v != "stdio")
         {
-            return Err("unsupported_server_options".into());
+            return Err(Code("unsupported_server_options").into());
         }
         let args = entry.get("args").map_or(Ok(Vec::new()), |v| {
-            v.as_array().ok_or("invalid_arguments").and_then(|v| {
+            v.as_array().ok_or(Code("invalid_arguments")).and_then(|v| {
                 v.iter()
-                    .map(|s| s.as_str().map(str::to_owned).ok_or("invalid_argument"))
+                    .map(|s| {
+                        s.as_str()
+                            .map(str::to_owned)
+                            .ok_or(Code("invalid_argument"))
+                    })
                     .collect()
             })
         })?;
         if args.len() > 256 || args.iter().map(String::len).sum::<usize>() > 131_072 {
-            return Err("startup_argument_limit".into());
+            return Err(Code("startup_argument_limit").into());
         }
         // Identity includes client path at composition time through the explicit
         // server ID below; command+args are separately hashed by the launcher.
         let server_id = format!("{}:{name}", &scope[..16]);
         if server_id.len() > 128 {
-            return Err("server_identity_limit".into());
+            return Err(Code("server_identity_limit").into());
         }
         let mut wrapped: Vec<String> = [
             "proxy",
@@ -131,7 +138,7 @@ fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8
     let mut bytes = serde_json::to_vec_pretty(&config)?;
     bytes.push(b'\n');
     if bytes.len() > MAX {
-        return Err("bound_configuration_limit".into());
+        return Err(Code("bound_configuration_limit").into());
     }
     Ok(bytes)
 }
@@ -139,17 +146,17 @@ fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8
 /// The only launched program is the runner's fixed trusted probe, never an
 /// upstream or its arguments. Report indices and fixed statuses, never names.
 pub async fn preflight(path: &Path, settings: &Settings, index: usize) -> Result<()> {
-    files::trusted(path.parent().ok_or("parent_required")?)?;
+    files::trusted(path.parent().ok_or(Code("parent_required"))?)?;
     let live = files::read(path, MAX)?;
     let receipt = sidecar(path, ".clawbell.json");
     let original = if receipt.exists() {
         let record: Value = serde_json::from_slice(&files::read(&receipt, MAX)?)?;
         let backup = files::read(&sidecar(path, ".bak"), MAX)?;
         if record["bound_sha256"] != digest(&live) || record["original_sha256"] != digest(&backup) {
-            return Err("binding_changed_or_incomplete".into());
+            return Err(Code("binding_changed_or_incomplete").into());
         }
         if transform(&backup, settings, &digest(text(path)?.as_bytes()))? != live {
-            return Err("binding_settings_changed".into());
+            return Err(Code("binding_settings_changed").into());
         }
         backup
     } else {
@@ -162,14 +169,14 @@ pub async fn preflight(path: &Path, settings: &Settings, index: usize) -> Result
         .get("mcpServers")
         .or_else(|| config.get("servers"))
         .and_then(Value::as_object)
-        .ok_or("invalid_server_map")?;
+        .ok_or(Code("invalid_server_map"))?;
     for (server_index, server) in servers.values().enumerate() {
         let result = clawbell_sandbox::native::NativeRunner::preflight(
             clawbell_sandbox::native::NativeConfig {
                 workspace: settings.workspace.clone(),
                 executable: server["command"]
                     .as_str()
-                    .ok_or("stdio_command_required")?
+                    .ok_or(Code("stdio_command_required"))?
                     .into(),
                 arguments: server.get("args").and_then(Value::as_array).map_or_else(
                     Vec::new,
@@ -200,9 +207,9 @@ pub async fn preflight(path: &Path, settings: &Settings, index: usize) -> Result
 /// Commit one file, with original backup and hash receipt. A failed/interrupted
 /// install keeps its backup; it never guesses recovery or overwrites that backup.
 pub fn init(path: &Path, settings: &Settings) -> Result<bool> {
-    files::trusted(path.parent().ok_or("parent_required")?)?;
+    files::trusted(path.parent().ok_or(Code("parent_required"))?)?;
     if std::fs::symlink_metadata(path)?.mode() & 0o022 != 0 {
-        return Err("writable_configuration_refused".into());
+        return Err(Code("writable_configuration_refused").into());
     }
     let original = files::read(path, MAX)?;
     let backup = sidecar(path, ".bak");
@@ -214,7 +221,7 @@ pub fn init(path: &Path, settings: &Settings) -> Result<bool> {
         {
             return Ok(false);
         }
-        return Err("binding_changed_or_incomplete".into());
+        return Err(Code("binding_changed_or_incomplete").into());
     }
     // Separate identical server names in different client configurations without
     // placing client paths in logs or baseline storage.
@@ -235,7 +242,7 @@ pub fn init(path: &Path, settings: &Settings) -> Result<bool> {
 /// Restore byte-for-byte only when both receipt hashes match. Later client edits
 /// cause refusal, preserving the live file and backup for manual reconciliation.
 pub fn unbind(path: &Path) -> Result<bool> {
-    files::trusted(path.parent().ok_or("parent_required")?)?;
+    files::trusted(path.parent().ok_or(Code("parent_required"))?)?;
     let receipt = sidecar(path, ".clawbell.json");
     let backup = sidecar(path, ".bak");
     if !receipt.exists() {
@@ -247,7 +254,7 @@ pub fn unbind(path: &Path) -> Result<bool> {
     if record["original_sha256"] != digest(&original)
         || (record["bound_sha256"] != digest(&current) && current != original)
     {
-        return Err("binding_changed_or_incomplete".into());
+        return Err(Code("binding_changed_or_incomplete").into());
     }
     if current != original {
         files::replace(path, &current, &original)?;

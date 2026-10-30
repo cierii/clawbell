@@ -21,10 +21,61 @@ pub trait Runner: Send {
     /// Must be idempotent; a remote cancellation cannot undo completed side effects.
     fn terminate(&mut self) -> impl Future<Output = Result<(), LaunchError>> + Send;
 }
-/// Static launch errors do not reveal environment variables or filesystem contents.
-#[derive(Debug, thiserror::Error)]
-#[error("required_process_isolation_unavailable")]
-pub struct LaunchError;
+/// Fixed host failures never contain paths, arguments, environment or child stderr.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LaunchError {
+    /// Required isolation could not be established.
+    #[error("required_process_isolation_unavailable")]
+    IsolationUnavailable,
+    /// Owner resource limits are outside supported bounds.
+    #[error("host_invalid_resource_limits")]
+    InvalidLimits,
+    /// The selected executable is missing or outside the supported location.
+    #[error("host_executable_refused")]
+    ExecutableRefused,
+    /// Startup arguments exceed the bounded budget.
+    #[error("host_argument_limit")]
+    ArgumentLimit,
+    /// Native enforcement is unavailable on this platform.
+    #[error("host_unsupported_platform")]
+    UnsupportedPlatform,
+    /// The runner must execute as an unprivileged owner.
+    #[error("host_root_refused")]
+    RootRefused,
+    /// The selected workspace cannot be safely mounted.
+    #[error("host_workspace_refused")]
+    WorkspaceRefused,
+    /// A writable delegated cgroups v2 subtree is required.
+    #[error("host_cgroup_unavailable")]
+    CgroupUnavailable,
+    /// Mandatory cpu, memory, pids or kill controls are unavailable.
+    #[error("host_resource_controls_unavailable")]
+    ResourceControlsUnavailable,
+    /// The mandatory syscall filter could not be prepared.
+    #[error("host_seccomp_unavailable")]
+    SeccompUnavailable,
+    /// Pinned isolation descriptors could not be prepared.
+    #[error("host_descriptor_setup_failed")]
+    DescriptorUnavailable,
+    /// The fixed bubblewrap executable is missing.
+    #[error("host_bubblewrap_unavailable")]
+    BubblewrapUnavailable,
+    /// The isolated process could not start.
+    #[error("host_isolated_spawn_failed")]
+    SpawnFailed,
+    /// The fixed trusted isolation probe timed out.
+    #[error("host_isolation_probe_timeout")]
+    ProbeTimeout,
+    /// The fixed trusted probe exited unsuccessfully; namespaces or bubblewrap capabilities may be unavailable.
+    #[error("host_isolation_probe_failed")]
+    ProbeFailed,
+    /// Complete containment cleanup could not be confirmed.
+    #[error("host_process_cleanup_failed")]
+    CleanupFailed,
+    /// A runner instance cannot be reused.
+    #[error("host_runner_already_started")]
+    AlreadyStarted,
+}
 
 #[cfg(unix)]
 pub mod memory;

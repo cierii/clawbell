@@ -1,5 +1,6 @@
 //! Conservative production composition: local stdio only, no network, no host
 //! writes, no reverse capabilities/resources/prompts and no secret restoration.
+use crate::errors::Code;
 use crate::files::{self, Result};
 use clawbell_audit::{
     baseline::BaselineStore,
@@ -148,12 +149,38 @@ impl Gate for AuditGate {
         Ok(())
     }
 }
+/// Validate the optional owner endpoint without exposing it to the runner.
+fn monitor_endpoint(
+    socket: Option<PathBuf>,
+    workspace: &std::path::Path,
+) -> Result<Option<PathBuf>> {
+    let endpoint = if let Some(path) = socket {
+        files::trusted(path.parent().ok_or(Code("monitor_parent_required"))?)?;
+        let parent = std::fs::canonicalize(path.parent().ok_or(Code("monitor_parent_required"))?)?;
+        if parent.starts_with(workspace)
+            || ["/usr", "/etc", "/var"]
+                .iter()
+                .any(|p| parent.starts_with(p))
+        {
+            return Err(Code("monitor_exposed_to_runner").into());
+        }
+        Some(path)
+    } else {
+        None
+    };
+    Ok(endpoint)
+}
 /// Validate owner input and audit launch before constructing any runner. Native
 /// preflight remains mandatory; missing delegation/isolation cannot spawn directly.
 pub async fn run(options: Options) -> Result<()> {
     let limits = options.limits()?;
     files::trusted(&options.state_dir)?;
-    files::trusted(options.policy.parent().ok_or("policy_parent_required")?)?;
+    files::trusted(
+        options
+            .policy
+            .parent()
+            .ok_or(Code("policy_parent_required"))?,
+    )?;
     files::trusted(&options.workspace)?;
     let workspace = std::fs::canonicalize(&options.workspace)?;
     let state = std::fs::canonicalize(&options.state_dir)?;
@@ -174,7 +201,11 @@ pub async fn run(options: Options) -> Result<()> {
     let launch = store.record(0, Outcome::Intent).await?;
     let config = NativeConfig {
         workspace: workspace.clone(),
-        executable: options.command.first().ok_or("command_required")?.clone(),
+        executable: options
+            .command
+            .first()
+            .ok_or(Code("command_required"))?
+            .clone(),
         arguments: options.command.iter().skip(1).cloned().collect(),
         cgroup_parent: options.cgroup_parent,
         limits: ResourceLimits {
@@ -192,20 +223,7 @@ pub async fn run(options: Options) -> Result<()> {
         }
     };
     let monitor = clawbell_proxy::monitor::Monitor::new()?;
-    let endpoint = if let Some(path) = options.monitor_socket {
-        files::trusted(path.parent().ok_or("monitor_parent_required")?)?;
-        let parent = std::fs::canonicalize(path.parent().ok_or("monitor_parent_required")?)?;
-        if parent.starts_with(&workspace)
-            || ["/usr", "/etc", "/var"]
-                .iter()
-                .any(|p| parent.starts_with(p))
-        {
-            return Err("monitor_exposed_to_runner".into());
-        }
-        Some(path)
-    } else {
-        None
-    };
+    let endpoint = monitor_endpoint(options.monitor_socket, &workspace)?;
     let mut gate = compose_monitor(
         policy,
         baseline,
@@ -261,10 +279,10 @@ fn validate_state(
             .iter()
             .any(|p| state.starts_with(p))
     {
-        return Err("state_exposed_to_runner".into());
+        return Err(Code("state_exposed_to_runner").into());
     }
     if server.is_empty() || server.len() > 128 {
-        return Err("invalid_server_identity".into());
+        return Err(Code("invalid_server_identity").into());
     }
     Ok(())
 }
@@ -362,7 +380,7 @@ pub(crate) async fn verify_audit_refusal(store: OperationStore) -> Result<()> {
         gate.inspect(Direction::Client, &message).await,
         Err(Error::Refused(Reason::AuditUnavailable))
     ) {
-        return Err("audit_loss_probe_failed".into());
+        return Err(Code("audit_loss_probe_failed").into());
     }
     Ok(())
 }

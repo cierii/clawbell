@@ -20,9 +20,13 @@ impl MemoryGuard {
     /// # Errors
     /// Returns a static refusal if the directory is unavailable or not a directory.
     pub fn open(workspace: &Path) -> Result<Self, LaunchError> {
-        let workspace = File::open(workspace).map_err(|_| LaunchError)?;
-        if !workspace.metadata().map_err(|_| LaunchError)?.is_dir() {
-            return Err(LaunchError);
+        let workspace = File::open(workspace).map_err(|_| LaunchError::IsolationUnavailable)?;
+        if !workspace
+            .metadata()
+            .map_err(|_| LaunchError::IsolationUnavailable)?
+            .is_dir()
+        {
+            return Err(LaunchError::IsolationUnavailable);
         }
         Ok(Self { workspace })
     }
@@ -38,11 +42,13 @@ impl MemoryGuard {
     /// Refuses unsupported hosts or failure to clone the pinned directory handle.
     pub fn prepare(&self, executable: &str, arguments: &[String]) -> Result<Command, LaunchError> {
         if !cfg!(target_os = "linux") || !executable.starts_with("/usr/bin/") {
-            return Err(LaunchError);
+            return Err(LaunchError::IsolationUnavailable);
         }
         let mut command = Command::new("/usr/bin/bwrap");
         command.env_clear().stdin(Stdio::from(
-            self.workspace.try_clone().map_err(|_| LaunchError)?,
+            self.workspace
+                .try_clone()
+                .map_err(|_| LaunchError::IsolationUnavailable)?,
         ));
         command
             .args([

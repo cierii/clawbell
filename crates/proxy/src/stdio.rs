@@ -239,10 +239,10 @@ where
             let _ = tokio::time::timeout(limits.request_timeout, runner.terminate()).await;
             return complete(
                 gate,
-                Err(if failure.is_err() {
-                    Error::Timeout
-                } else {
-                    Error::Refused(crate::Reason::IsolationUnavailable)
+                Err(match failure {
+                    Err(_) => Error::Timeout,
+                    Ok(Err(error)) => Error::Host(error),
+                    Ok(Ok(_)) => Error::Refused(crate::Reason::IsolationUnavailable),
                 }),
                 limits,
             )

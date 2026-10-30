@@ -12,7 +12,9 @@ use std::path::Path;
 /// Refuses non-absolute paths and characters unsafe in SBPL literals. This function
 /// does not grant authorization, pin a directory, or start a process.
 pub fn profile(workspace: &Path) -> Result<String, LaunchError> {
-    let path = workspace.to_str().ok_or(LaunchError)?;
+    let path = workspace
+        .to_str()
+        .ok_or(LaunchError::IsolationUnavailable)?;
     if !workspace.is_absolute()
         || path == "/"
         || path.len() > 4096
@@ -23,7 +25,7 @@ pub fn profile(workspace: &Path) -> Result<String, LaunchError> {
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
     {
-        return Err(LaunchError);
+        return Err(LaunchError::IsolationUnavailable);
     }
     Ok(format!(
         r#"(version 1)

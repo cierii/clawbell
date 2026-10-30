@@ -1,3 +1,15 @@
+# Release security and actionable host errors
+
+- Distribute the MIT license and private vulnerability reporting policy.
+- Gate release publication on a current RustSec scan; scan daily for new advisories.
+- Include a CycloneDX JSON SBOM, publish checksums and create GitHub provenance/SBOM
+  attestations for the binary and archive from the tagged build job.
+- Replace generic CLI failure output with payload-free host and validation codes;
+  preserve typed isolation failures through proxy startup. Missing facilities still
+  refuse installation before backups, receipts or upstream execution.
+- Runner library consumers must migrate from the unit LaunchError to typed variants.
+  See [README](../README.md) and [SECURITY.md](../SECURITY.md) for verification and limits.
+
 # Owner deadlines and database maintenance
 
 - Split proxy request, idle and absolute session limits; defaults are 30/600/3600 s.

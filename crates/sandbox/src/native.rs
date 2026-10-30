@@ -34,7 +34,7 @@ impl ResourceLimits {
             || self.lifetime.is_zero()
             || self.lifetime > Duration::from_hours(24)
         {
-            return Err(LaunchError);
+            return Err(LaunchError::InvalidLimits);
         }
         Ok(self)
     }
@@ -77,39 +77,39 @@ impl NativeRunner {
                 .any(|part| matches!(part, std::path::Component::ParentDir))
             || !executable.is_file()
         {
-            return Err(LaunchError);
+            return Err(LaunchError::ExecutableRefused);
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if executable
                 .metadata()
-                .map_err(|_| LaunchError)?
+                .map_err(|_| LaunchError::ExecutableRefused)?
                 .permissions()
                 .mode()
                 & 0o111
                 == 0
             {
-                return Err(LaunchError);
+                return Err(LaunchError::ExecutableRefused);
             }
         }
         if config.arguments.len() > 256
             || config.arguments.iter().map(String::len).sum::<usize>() > 131_072
         {
-            return Err(LaunchError);
+            return Err(LaunchError::ArgumentLimit);
         }
         config.executable = "/usr/bin/true".into();
         config.arguments.clear();
         let mut runner = Self::new(config)?;
         let probe = async {
             let mut child = runner.spawn().await?;
-            child.wait().await.map_err(|_| LaunchError)
+            child.wait().await.map_err(|_| LaunchError::ProbeFailed)
         };
         let status = tokio::time::timeout(Duration::from_secs(10), probe).await;
         let cleanup = runner.terminate().await;
         cleanup?;
-        if !status.map_err(|_| LaunchError)??.success() {
-            return Err(LaunchError);
+        if !status.map_err(|_| LaunchError::ProbeTimeout)??.success() {
+            return Err(LaunchError::ProbeFailed);
         }
         Ok(())
     }
@@ -126,7 +126,7 @@ impl NativeRunner {
         #[cfg(not(target_os = "linux"))]
         {
             config.limits.validate()?;
-            Err(LaunchError)
+            Err(LaunchError::UnsupportedPlatform)
         }
     }
 }
@@ -139,7 +139,7 @@ impl Runner for NativeRunner {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            Err(LaunchError)
+            Err(LaunchError::UnsupportedPlatform)
         }
     }
     #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async_trait_impl))]
@@ -152,5 +152,32 @@ impl Runner for NativeRunner {
         {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn preflight_reports_invalid_executable_without_executing_or_creating_cgroups() {
+        let result = NativeRunner::preflight(NativeConfig {
+            workspace: "/nonexistent-synthetic-workspace".into(),
+            executable: "/nonexistent-synthetic-executable".into(),
+            arguments: Vec::new(),
+            cgroup_parent: "/nonexistent-synthetic-cgroup".into(),
+            limits: ResourceLimits::default(),
+        })
+        .await;
+        assert_eq!(result, Err(LaunchError::ExecutableRefused));
+    }
+
+    #[test]
+    fn invalid_limits_have_a_specific_code() {
+        let limits = ResourceLimits {
+            tasks: 0,
+            ..ResourceLimits::default()
+        };
+        assert!(matches!(limits.validate(), Err(LaunchError::InvalidLimits)));
     }
 }

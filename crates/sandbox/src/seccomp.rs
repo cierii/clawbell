@@ -13,7 +13,7 @@ pub(crate) fn filter() -> Result<File, LaunchError> {
     #[cfg(target_arch = "aarch64")]
     let arch = 0xc000_00b7;
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    return Err(LaunchError);
+    return Err(LaunchError::SeccompUnavailable);
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {
         let mut bytes = Vec::new();
@@ -53,13 +53,19 @@ pub(crate) fn filter() -> Result<File, LaunchError> {
             libc::SYS_delete_module,
             libc::SYS_reboot,
         ] {
-            emit(0x15, 0, 1, u32::try_from(nr).map_err(|_| LaunchError)?);
+            emit(
+                0x15,
+                0,
+                1,
+                u32::try_from(nr).map_err(|_| LaunchError::SeccompUnavailable)?,
+            );
             emit(0x06, 0, 0, 0x0005_0001); // ERRNO EPERM
         }
         emit(0x06, 0, 0, 0x7fff_0000); // ALLOW (filesystem still kernel-confined)
         let mut file = anonymous_file()?;
-        file.write_all(&bytes).map_err(|_| LaunchError)?;
-        file.rewind().map_err(|_| LaunchError)?;
+        file.write_all(&bytes)
+            .map_err(|_| LaunchError::SeccompUnavailable)?;
+        file.rewind().map_err(|_| LaunchError::SeccompUnavailable)?;
         Ok(file)
     }
 }
@@ -68,7 +74,7 @@ fn anonymous_file() -> Result<File, LaunchError> {
     // SAFETY: static NUL-terminated name; successful fresh fd transferred once.
     let fd = unsafe { libc::memfd_create(c"clawbell-seccomp".as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
-        return Err(LaunchError);
+        return Err(LaunchError::SeccompUnavailable);
     }
     Ok(unsafe { File::from_raw_fd(fd) })
 }

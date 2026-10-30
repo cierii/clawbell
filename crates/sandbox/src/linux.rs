@@ -24,7 +24,9 @@ struct Group {
 }
 impl Group {
     fn kill(&self) -> Result<(), LaunchError> {
-        (&self.kill).write_all(b"1").map_err(|_| LaunchError)
+        (&self.kill)
+            .write_all(b"1")
+            .map_err(|_| LaunchError::CleanupFailed)
     }
 }
 impl Drop for Group {
@@ -62,23 +64,28 @@ impl LinuxRunner {
     /// Refuses invalid budgets, root, missing controllers or inaccessible isolation.
     pub fn new(config: NativeConfig) -> Result<Self, LaunchError> {
         config.limits.validate()?;
-        if !sys::non_root()
-            || !config.executable.starts_with("/usr/bin/")
+        if !sys::non_root() {
+            return Err(LaunchError::RootRefused);
+        }
+        if !config.executable.starts_with("/usr/bin/")
             || Path::new(&config.executable)
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
-            || config.arguments.len() > 256
+        {
+            return Err(LaunchError::ExecutableRefused);
+        }
+        if config.arguments.len() > 256
             || config.arguments.iter().map(String::len).sum::<usize>() > 131_072
         {
-            return Err(LaunchError);
+            return Err(LaunchError::ArgumentLimit);
         }
         let workspace = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
             .open(&config.workspace)
-            .map_err(|_| LaunchError)?;
+            .map_err(|_| LaunchError::WorkspaceRefused)?;
         let canonical = fs::canonicalize(format!("/proc/self/fd/{}", workspace.as_raw_fd()))
-            .map_err(|_| LaunchError)?;
+            .map_err(|_| LaunchError::WorkspaceRefused)?;
         if canonical == Path::new("/")
             || canonical == Path::new("/home")
             || canonical == Path::new("/root")
@@ -88,15 +95,15 @@ impl LinuxRunner {
                 .components()
                 .any(|c| matches!(c.as_os_str().to_str(), Some(".ssh" | ".aws" | ".gnupg")))
         {
-            return Err(LaunchError);
+            return Err(LaunchError::WorkspaceRefused);
         }
         let parent = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
             .open(&config.cgroup_parent)
-            .map_err(|_| LaunchError)?;
-        if !sys::cgroup_fs(&parent).map_err(|_| LaunchError)? {
-            return Err(LaunchError);
+            .map_err(|_| LaunchError::CgroupUnavailable)?;
+        if !sys::cgroup_fs(&parent).map_err(|_| LaunchError::CgroupUnavailable)? {
+            return Err(LaunchError::CgroupUnavailable);
         }
         let pinned = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()));
         let name = format!(
@@ -105,7 +112,7 @@ impl LinuxRunner {
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
         let setup = pinned.join(&name);
-        fs::create_dir(&setup).map_err(|_| LaunchError)?;
+        fs::create_dir(&setup).map_err(|_| LaunchError::CgroupUnavailable)?;
         // Keep a stable directory handle through construction and later cleanup.
         let result = (|| {
             for (file, value) in [
@@ -115,14 +122,16 @@ impl LinuxRunner {
                 ("pids.max", config.limits.tasks.to_string()),
                 ("cpu.max", format!("{} 100000", config.limits.cpu_quota)),
             ] {
-                fs::write(setup.join(file), value).map_err(|_| LaunchError)?;
+                fs::write(setup.join(file), value)
+                    .map_err(|_| LaunchError::ResourceControlsUnavailable)?;
             }
-            let directory = fs::canonicalize(&setup).map_err(|_| LaunchError)?;
+            let directory =
+                fs::canonicalize(&setup).map_err(|_| LaunchError::ResourceControlsUnavailable)?;
             let kill = OpenOptions::new()
                 .write(true)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(setup.join("cgroup.kill"))
-                .map_err(|_| LaunchError)?;
+                .map_err(|_| LaunchError::ResourceControlsUnavailable)?;
             Ok(Self {
                 config,
                 workspace,
@@ -141,14 +150,14 @@ impl Runner for LinuxRunner {
     #[allow(clippy::unused_async_trait_impl)] // Spawn must execute only when the future is polled.
     async fn spawn(&mut self) -> Result<Child, LaunchError> {
         if self.started {
-            return Err(LaunchError);
+            return Err(LaunchError::AlreadyStarted);
         }
         self.started = true;
         let membership = OpenOptions::new()
             .write(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(self.group.directory.join("cgroup.procs"))
-            .map_err(|_| LaunchError)?;
+            .map_err(|_| LaunchError::ResourceControlsUnavailable)?;
         let filter = seccomp::filter()?;
         let mut command = std::process::Command::new("/usr/bin/bwrap");
         command
@@ -206,14 +215,20 @@ impl Runner for LinuxRunner {
             .args(&self.config.arguments);
         sys::setup(
             &mut command,
-            sys::high_fd(&self.workspace).map_err(|_| LaunchError)?,
-            sys::high_fd(&filter).map_err(|_| LaunchError)?,
-            sys::high_fd(&membership).map_err(|_| LaunchError)?,
+            sys::high_fd(&self.workspace).map_err(|_| LaunchError::DescriptorUnavailable)?,
+            sys::high_fd(&filter).map_err(|_| LaunchError::DescriptorUnavailable)?,
+            sys::high_fd(&membership).map_err(|_| LaunchError::DescriptorUnavailable)?,
         );
         let child = Command::from(command)
             .kill_on_drop(true)
             .spawn()
-            .map_err(|_| LaunchError)?;
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    LaunchError::BubblewrapUnavailable
+                } else {
+                    LaunchError::SpawnFailed
+                }
+            })?;
         let group = Arc::clone(&self.group);
         let lifetime = self.config.limits.lifetime;
         self.watchdog = Some(tokio::spawn(async move {
@@ -229,13 +244,13 @@ impl Runner for LinuxRunner {
         }
         for _ in 0..200 {
             let events = fs::read_to_string(self.group.directory.join("cgroup.events"))
-                .map_err(|_| LaunchError)?;
+                .map_err(|_| LaunchError::CleanupFailed)?;
             if events.lines().any(|line| line == "populated 0") {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        Err(LaunchError)
+        Err(LaunchError::CleanupFailed)
     }
 }
 impl Drop for LinuxRunner {

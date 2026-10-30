@@ -85,6 +85,9 @@ impl Limits {
 /// Static reason codes deliberately exclude untrusted payloads and diagnostics.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Fixed local isolation failure, retained for owner diagnostics.
+    #[error("{0}")]
+    Host(clawbell_sandbox::LaunchError),
     /// Framing, JSON-RPC or MCP schema violation.
     #[error("invalid_message")]
     InvalidMessage,
@@ -119,6 +122,7 @@ impl Error {
     #[must_use]
     pub const fn reason(&self) -> Reason {
         match self {
+            Self::Host(_) => Reason::IsolationUnavailable,
             Self::InvalidMessage => Reason::InvalidMessage,
             Self::Protocol => Reason::Protocol,
             Self::Limit => Reason::Limit,

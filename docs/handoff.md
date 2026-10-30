@@ -1,3 +1,71 @@
+# Handoff — 2026-10-31: release security and host diagnostics
+
+Delivered the MIT LICENSE and consistent workspace license metadata, SECURITY.md
+with private reporting and artifact verification, current RustSec scanning on
+PR/push/tag and daily schedule, and CycloneDX 1.5 SBOM packaging. Publication now
+requires dependency/native/ordinary checks and verifies provenance and SBOM
+attestations against the repository, workflow, tag and commit before release.
+Pinned actions/attest v4 signs both the binary and archive in the tagged build job;
+verification bundles and the standalone SBOM/checksums are release assets.
+
+The pinned cargo-cyclonedx 0.5.9 tool runs offline with an unchanged-lockfile guard.
+Local workspace component IDs and graph references are normalized to fixed URNs;
+local file purls are removed so builder paths are not exported. Graph integrity,
+nonempty components and absence of local paths are checked before packaging.
+The archive includes LICENSE, SECURITY.md, AGENTS.md and the identical SBOM.
+The inventory covers Cargo production/build dependencies, not complete host/native
+C dependencies. No runtime dependency or lockfile version changed.
+
+CLI diagnostics replace operation_failed with fixed validation, I/O and typed host
+codes plus trusted hints. Unknown errors are never formatted. Paths, credentials,
+JSON data, terminal control strings and child stderr stay hidden. Native errors
+identify limits, executable/workspace, root, cgroups/controllers, seccomp,
+descriptors, bubblewrap/spawn, probe and cleanup failures. Proxy Error::Host retains
+startup details while keeping the existing isolation_unavailable audit reason.
+LaunchError is now an enum; source consumers must migrate unit constructions and
+exhaustive matches. Existing permissions and fail-closed behavior are unchanged.
+Probe exit status alone cannot distinguish namespace denial from unsupported
+bubblewrap flags; diagnostics document this limit rather than guess.
+
+Verification:
+- Context7: official GitHub Actions provenance/SBOM attestation documentation.
+  Official cargo-cyclonedx/cargo-audit READMEs and gh verification source checked;
+  actions/attest v4 SHA resolved directly from its remote tag.
+- cargo-audit 0.22.2 fetched current RustSec data and scanned Cargo.lock (267
+  dependencies, 1395 advisories): exit 0, no vulnerabilities reported.
+- scripts/check-release.sh: exit 0, locked fetch, formatting, all-target Clippy
+  with denied warnings, workspace tests, release build, CLI/policy smoke tests,
+  explicit performance, memory/native containment/SSH and real CLI attacks.
+  Native tests used a real systemd-delegated scope outside tool socket restrictions.
+- 4,000 warmed parse/encode + policy/schema/DLP/monitor/FULL durable-audit packets:
+  p99 372.225 us, max 669.950 us. 2,000 full CLI/native/audit round trips:
+  p99 0.718 ms, max 1.612 ms. Native transport max 203.075 us. All samples <5 ms;
+  bounded workloads on this host do not establish a hard real-time guarantee.
+- Final extra tests for retained spawn errors/teardown/no forwarding, invalid
+  executable and resource limits passed. Final all-target Clippy passed too.
+  CLI tests verify fake cgroup denial without config/backups/receipts/upstream
+  effects, and safe host output. Unknown-error Display is never invoked; synthetic
+  secrets and terminal controls are not echoed. Existing installer tests pass.
+- Package regenerated successfully: 223 SBOM components; graph, workspace path
+  removal, root MIT metadata, archive members, exact binary/SBOM bytes and both
+  checksums verified. Package secret scan found nothing.
+- Fetched origin refs; gitleaks scanned all 12 existing commits with no findings.
+  Final staged candidate is scanned before commit. No exhaustive absence-of-secrets
+  guarantee or remote-fork erasure is claimed.
+- Bash syntax, workflow YAML/release dependency graph, documentation relative links
+  and fences, git diff --check and AGENTS.md (unchanged, 199 lines) verified.
+  No frontend changed or exists; npm/browser checks are not applicable.
+
+Both pre-existing untracked owner documents remain untouched and excluded.
+GitHub connector returns 404 for this repository; SSH fetch is available.
+Local checks cannot exercise GitHub OIDC attestations. They execute on a tagged
+release and require a GitHub plan supporting attestations for this repository;
+missing support blocks publication. No tag or new release was requested/created.
+Next step: final candidate scan, commit/push and verify the remote commit. GitHub
+Actions status must be checked separately; it is not certified by local tests.
+
+---
+
 # Handoff — 2026-10-31: deadlines, pin reviews and audit maintenance
 
 Delivered independent CLI/library request, idle and absolute session limits with

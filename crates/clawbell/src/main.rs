@@ -1,10 +1,12 @@
 //! Owner CLI and fail-closed local MCP launcher.
 mod bind;
 mod diagnostics;
+mod errors;
 mod files;
 mod launch;
 mod manage;
 mod scan;
+use crate::errors::Code;
 use clap::{Parser, Subcommand};
 use clawbell_proxy::monitor::{Command, Event, frame};
 use std::fmt::Write as _;
@@ -82,28 +84,29 @@ enum PolicyAction {
 
 #[tokio::main]
 async fn main() {
-    if let Ok(code) = dispatch(Cli::parse().command).await {
-        std::process::exit(code);
+    match dispatch(Cli::parse().command).await {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("{}", errors::diagnostic(error.as_ref()));
+            std::process::exit(1);
+        }
     }
-    eprintln!(
-        "operation_failed: configuration, inspection or mandatory security prerequisite refused; no raw diagnostics are printed"
-    );
-    std::process::exit(1);
 }
+
 fn configurations(config: Vec<PathBuf>) -> files::Result<Vec<PathBuf>> {
     let mut paths = if config.is_empty() {
-        let home = std::env::var_os("HOME").ok_or("home_required")?;
+        let home = std::env::var_os("HOME").ok_or(Code("home_required"))?;
         bind::discover(&PathBuf::from(home), &std::env::current_dir()?)
     } else {
         config
     };
     if paths.len() > 32 {
-        return Err("configuration_count_limit".into());
+        return Err(Code("configuration_count_limit").into());
     }
     paths.sort();
     paths.dedup();
     if paths.is_empty() {
-        return Err("no_supported_configurations".into());
+        return Err(Code("no_supported_configurations").into());
     }
     for path in &mut paths {
         *path = std::path::absolute(&*path)?;
@@ -115,10 +118,9 @@ async fn dispatch(action: Action) -> files::Result<i32> {
         Action::Pins(options) => manage::pins(options).await?,
         Action::Audit(options) => {
             tokio::task::spawn_blocking(move || {
-                manage::audit(options).map_err(|_| "audit_maintenance_failed".to_owned())
+                manage::audit(options).map_err(|_| Code("audit_maintenance_failed"))
             })
-            .await?
-            .map_err(std::io::Error::other)?;
+            .await??;
         }
         Action::Doctor(options) => diagnostics::run(options).await?,
         Action::Demo(options) => {
@@ -162,14 +164,19 @@ async fn dispatch(action: Action) -> files::Result<i32> {
             )?)?)?;
             files::trusted(&settings.state_dir)?;
             files::trusted(&settings.workspace)?;
-            files::trusted(settings.policy.parent().ok_or("policy_parent_required")?)?;
+            files::trusted(
+                settings
+                    .policy
+                    .parent()
+                    .ok_or(Code("policy_parent_required"))?,
+            )?;
             if std::fs::metadata(&settings.state_dir)?.permissions().mode() & 0o777 != 0o700
                 || settings.state_dir.starts_with(&settings.workspace)
                 || ["/usr", "/etc", "/var"]
                     .iter()
                     .any(|path| settings.state_dir.starts_with(path))
             {
-                return Err("private_external_state_required".into());
+                return Err(Code("private_external_state_required").into());
             }
             let paths = configurations(config)?;
             for (index, path) in paths.iter().enumerate() {
@@ -203,20 +210,21 @@ async fn dispatch(action: Action) -> files::Result<i32> {
 async fn run(socket: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
-        return Err("terminal_required".into());
+        return Err(Code("terminal_required").into());
     }
-    let parent = std::fs::symlink_metadata(socket.parent().ok_or("private_directory_required")?)?;
+    let parent =
+        std::fs::symlink_metadata(socket.parent().ok_or(Code("private_directory_required"))?)?;
     let endpoint = std::fs::symlink_metadata(&socket)?;
     if !parent.is_dir()
         || parent.permissions().mode() & 0o777 != 0o700
         || endpoint.file_type().is_symlink()
         || endpoint.permissions().mode() & 0o777 != 0o600
     {
-        return Err("unsafe_socket".into());
+        return Err(Code("unsafe_socket").into());
     }
     let stream = UnixStream::connect(socket).await?;
     if stream.peer_cred()?.uid() != parent.uid() {
-        return Err("wrong_owner".into());
+        return Err(Code("wrong_owner").into());
     }
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
@@ -329,7 +337,7 @@ mod tests {
                 "/usr/bin/true",
             ])?;
             let Action::Proxy(options) = cli.command else {
-                return Err("proxy_required".into());
+                return Err(Code("proxy_required").into());
             };
             assert!(options.limits().is_err());
         }

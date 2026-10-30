@@ -1,4 +1,5 @@
 //! Fixed trusted host probes. No downloaded code, owner data or client config is used.
+use crate::errors::Code;
 use crate::files::Result;
 use clawbell_audit::operations::{OperationStore, Outcome};
 use clawbell_sandbox::{
@@ -38,7 +39,7 @@ fn temporary() -> Result<Temporary> {
             Err(e) => return Err(e.into()),
         }
     }
-    Err("probe_directory_unavailable".into())
+    Err(Code("probe_directory_unavailable").into())
 }
 /// A failed prerequisite or probe is an error, never a skipped/pass result.
 pub async fn run(options: Options) -> Result<()> {
@@ -84,14 +85,15 @@ time.sleep(60)
         outside.to_string_lossy().into_owned(),
     ]))?;
     let mut child = runner.spawn().await?;
-    let mut lines = BufReader::new(child.stdout.take().ok_or("probe_stdout_missing")?).lines();
+    let mut lines =
+        BufReader::new(child.stdout.take().ok_or(Code("probe_stdout_missing"))?).lines();
     for _ in 0..2 {
         if tokio::time::timeout(Duration::from_secs(10), lines.next_line())
             .await??
             .as_deref()
             != Some("contained")
         {
-            return Err("containment_probe_failed".into());
+            return Err(Code("containment_probe_failed").into());
         }
     }
     // terminate waits for cgroup populated=0, covering detached descendants too.
@@ -100,7 +102,7 @@ time.sleep(60)
     if std::fs::read(&outside)? != b"SYNTHETIC-DOCTOR-CANARY"
         || workspace.join("forbidden").exists()
     {
-        return Err("host_fixture_changed".into());
+        return Err(Code("host_fixture_changed").into());
     }
     println!(
         "outside_read: blocked\nworkspace_write: blocked\nsockets: blocked\ndescendants_after_cancel: absent"

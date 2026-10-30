@@ -332,3 +332,50 @@ flag automatically. Only policy `require_approval` calls wait for approval;
 missing owner, disconnect, rejection or the 25-second deadline deny. Replies
 apply once to the suspended call and cannot override any independent deny.
 Human wait and native startup are excluded from the packet latency budget.
+
+## Release security and licensing
+
+clawbell is distributed under the [MIT license](LICENSE). Report vulnerabilities
+privately using [SECURITY.md](SECURITY.md); it also documents supported versions,
+release verification and attestation limits. CI scans the reviewed Cargo.lock
+against RustSec on pull requests, pushes and a daily schedule. Publication requires
+a successful scan as well as existing native security and latency checks.
+
+Local release packaging requires pinned development tools (not runtime dependencies):
+
+```bash
+cargo install cargo-audit --version 0.22.2 --locked
+cargo install cargo-cyclonedx --version 0.5.9 --locked
+cargo audit --file Cargo.lock
+bash scripts/package-release.sh
+```
+
+Build and verify the release binary first with `bash scripts/check-release.sh`.
+Packaging generates a CycloneDX 1.5 JSON SBOM using offline Cargo metadata for the
+same x86-64 Linux/default-feature binary graph, includes it with LICENSE and
+SECURITY.md in the archive, and publishes a separate SBOM and checksums. Tagged
+GitHub builds attest both the binary and archive with provenance and the SBOM;
+local packaging does not create attestations. Follow SECURITY.md before running
+a downloaded release. The SBOM includes Rust production/build dependencies; it
+is not a complete inventory of host tools or bundled C code.
+
+## Safe error diagnostics
+
+CLI failures exit 1 and write a fixed `code: hint` line to stderr. Proxy stdout
+remains exclusively MCP. Host codes distinguish missing paths, permissions,
+existing backups, symlinks, read-only/full storage, unsafe workspaces, invalid
+limits, missing cgroups/controllers, bubblewrap, seccomp, descriptor setup,
+probe timeout/failure and incomplete process cleanup. For example,
+`host_cgroup_unavailable` requires an owner-delegated cgroups v2 subtree;
+`host_resource_controls_unavailable` requires cpu/memory/pids and cgroup.kill.
+Use `clawbell doctor --cgroup-parent <delegation>` after correcting host setup.
+
+A failed trusted probe reports `host_isolation_probe_failed`: namespace denial
+and unsupported bubblewrap capabilities cannot be distinguished safely from an
+exit status alone. Raw stderr, paths, environment, JSON contents and credentials
+are never printed. Owner input validation retains specific static codes such as
+`binding_changed_or_incomplete`; unknown error types use
+`host_unclassified_failure`. Refusal never authorizes fallback or automatic retry.
+The Rust runner now exposes typed `LaunchError` variants; library consumers must
+update unit-struct constructions and exhaustive matches. Proxy `Error::Host`
+preserves that detail while the audit reason remains `isolation_unavailable`.

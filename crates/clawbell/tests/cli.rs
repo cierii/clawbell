@@ -83,6 +83,10 @@ fn init_fake_cgroup_refuses_without_binding_backups_or_upstream_execution() -> R
         assert_eq!(fs::read(&config)?, original);
         assert!(!root.join("mcp.json.bak").exists());
         assert!(!root.join("mcp.json.clawbell.json").exists());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(stderr.starts_with("host_cgroup_unavailable:"));
+        assert!(!stderr.contains("synthetic-private-server"));
+        assert!(!stderr.contains(root.to_str().ok_or("utf8")?));
         assert!(!marker.exists());
         assert_eq!(fs::read_dir(&cgroup)?.count(), 0);
         let stdout = String::from_utf8(output.stdout)?;
@@ -107,7 +111,9 @@ fn diagnostics_fail_closed_without_real_delegation() -> Result {
             .output()?;
         assert_eq!(output.status.code(), Some(1));
         assert!(!String::from_utf8(output.stdout)?.contains("passed"));
-        assert!(!String::from_utf8(output.stderr)?.contains("nonexistent-synthetic"));
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(stderr.starts_with("host_cgroup_unavailable:"));
+        assert!(!stderr.contains("nonexistent-synthetic"));
     }
     Ok(())
 }

@@ -437,7 +437,7 @@ for line in sys.stdin:
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|_| clawbell_sandbox::LaunchError);
+            .map_err(|_| clawbell_sandbox::LaunchError::IsolationUnavailable);
         if let Ok(child) = &child {
             self.pid = child.id();
         }
@@ -753,5 +753,50 @@ async fn independent_idle_request_and_absolute_deadlines() -> TestResult {
         assert!(matches!(result, Err(Error::Timeout)));
         assert!(finished);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_spawn_preserves_host_code_and_tears_down_without_forwarding() -> TestResult {
+    struct RefusingRunner(bool);
+    impl clawbell_sandbox::Runner for RefusingRunner {
+        fn spawn(
+            &mut self,
+        ) -> impl std::future::Future<
+            Output = Result<tokio::process::Child, clawbell_sandbox::LaunchError>,
+        > + Send {
+            std::future::ready(Err(clawbell_sandbox::LaunchError::DescriptorUnavailable))
+        }
+        fn terminate(
+            &mut self,
+        ) -> impl std::future::Future<Output = Result<(), clawbell_sandbox::LaunchError>> + Send
+        {
+            self.0 = true;
+            std::future::ready(Ok(()))
+        }
+    }
+    let mut gate = FixtureGate::default();
+    let mut runner = RefusingRunner(false);
+    let result = stdio::run(
+        tokio::io::empty(),
+        tokio::io::sink(),
+        &mut gate,
+        &mut runner,
+        Limits::default(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(Error::Host(
+            clawbell_sandbox::LaunchError::DescriptorUnavailable
+        ))
+    ));
+    assert!(runner.0);
+    assert!(gate.finished);
+    assert_eq!(gate.seen, 0);
+    assert_eq!(
+        Error::Host(clawbell_sandbox::LaunchError::DescriptorUnavailable).reason(),
+        clawbell_proxy::Reason::IsolationUnavailable
+    );
     Ok(())
 }

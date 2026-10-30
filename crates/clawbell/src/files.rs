@@ -1,6 +1,7 @@
 //! Owner-controlled filesystem adapter. Ancestors cannot be symlinks or writable
 //! by other users (a sticky system temporary directory is allowed). Same-UID
 //! malicious processes remain outside the project's owner trust boundary.
+use crate::errors::Code;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
@@ -10,17 +11,17 @@ use std::{
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub fn trusted(path: &Path) -> Result<()> {
     if !path.is_absolute() {
-        return Err("absolute_path_required".into());
+        return Err(Code("absolute_path_required").into());
     }
     let mut cursor = std::path::PathBuf::new();
     for component in path.components() {
         if matches!(component, Component::ParentDir | Component::CurDir) {
-            return Err("unsafe_path".into());
+            return Err(Code("unsafe_path").into());
         }
         cursor.push(component);
         let meta = std::fs::symlink_metadata(&cursor)?;
         if !meta.is_dir() || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0) {
-            return Err("untrusted_directory".into());
+            return Err(Code("untrusted_directory").into());
         }
     }
     Ok(())
@@ -32,12 +33,12 @@ pub fn read(path: &Path, max: usize) -> Result<Vec<u8>> {
         .open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.len() > u64::try_from(max)? {
-        return Err("unsafe_file".into());
+        return Err(Code("unsafe_file").into());
     }
     let mut bytes = Vec::new();
     file.take(u64::try_from(max)? + 1).read_to_end(&mut bytes)?;
     if bytes.len() > max {
-        return Err("file_limit".into());
+        return Err(Code("file_limit").into());
     }
     Ok(bytes)
 }
@@ -52,7 +53,7 @@ pub fn create(path: &Path, bytes: &[u8]) -> Result<()> {
     sync_parent(path)
 }
 pub fn sync_parent(path: &Path) -> Result<()> {
-    File::open(path.parent().ok_or("parent_required")?)?.sync_all()?;
+    File::open(path.parent().ok_or(Code("parent_required"))?)?.sync_all()?;
     Ok(())
 }
 /// Replacement occurs only in a trusted directory, using an exclusive temporary
@@ -63,7 +64,7 @@ pub fn replace(path: &Path, expected: &[u8], bytes: &[u8]) -> Result<()> {
     create(&temp, bytes)?;
     let result = (|| {
         if read(path, 1024 * 1024)? != expected {
-            return Err("configuration_changed".into());
+            return Err(Code("configuration_changed").into());
         }
         std::fs::rename(&temp, path)?;
         sync_parent(path)

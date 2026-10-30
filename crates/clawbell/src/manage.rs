@@ -1,4 +1,5 @@
 //! Explicit owner control plane; never reachable through MCP.
+use crate::errors::Code;
 use crate::files::{self, Result};
 use clawbell_audit::{baseline::BaselineStore, maintenance};
 use std::{io::Write, path::PathBuf};
@@ -40,7 +41,9 @@ pub async fn pins(options: Pins) -> Result<()> {
             store.accept(review_id).await?;
             println!("baseline_accepted_reconnect_required");
         }
-        PinCommand::Accept { .. } => return Err("explicit_acceptance_required".into()),
+        PinCommand::Accept { .. } => {
+            return Err(Code("explicit_acceptance_required").into());
+        }
     }
     Ok(())
 }
@@ -99,7 +102,7 @@ pub fn audit(options: Audit) -> Result<()> {
             limit,
         } => {
             use std::os::unix::fs::OpenOptionsExt;
-            files::trusted(output.parent().ok_or("output_parent_required")?)?;
+            files::trusted(output.parent().ok_or(Code("output_parent_required"))?)?;
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -118,7 +121,9 @@ pub fn audit(options: Audit) -> Result<()> {
                 serde_json::json!({"status":"audit_rotated","archive":archive,"sha256":sha256})
             );
         }
-        AuditCommand::Rotate { .. } => return Err("explicit_acceptance_required".into()),
+        AuditCommand::Rotate { .. } => {
+            return Err(Code("explicit_acceptance_required").into());
+        }
     }
     Ok(())
 }
