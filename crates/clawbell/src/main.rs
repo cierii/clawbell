@@ -1,5 +1,6 @@
 //! Owner CLI and fail-closed local MCP launcher.
 mod bind;
+mod diagnostics;
 mod files;
 mod launch;
 mod scan;
@@ -25,6 +26,10 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Check native host prerequisites; optionally exercise adversarial probes.
+    Doctor(diagnostics::Options),
+    /// Run the synthetic containment and durable-audit demonstration.
+    Demo(diagnostics::DemoOptions),
     /// Bind supported JSON MCP clients through the sandboxed firewall.
     Init {
         /// Explicit JSON client configurations; otherwise use known locations.
@@ -102,6 +107,14 @@ fn configurations(config: Vec<PathBuf>) -> files::Result<Vec<PathBuf>> {
 }
 async fn dispatch(action: Action) -> files::Result<i32> {
     match action {
+        Action::Doctor(options) => diagnostics::run(options).await?,
+        Action::Demo(options) => {
+            diagnostics::run(diagnostics::Options {
+                cgroup_parent: options.cgroup_parent,
+                self_test: true,
+            })
+            .await?;
+        }
         Action::Monitor { socket } => run(socket).await?,
         Action::Scan { path } => return Ok(if scan::run(&path)? { 2 } else { 0 }),
         Action::Policy {

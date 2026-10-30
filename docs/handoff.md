@@ -1,3 +1,43 @@
+# Handoff — 2026-10-30: host diagnostics and production approvals
+
+Delivered `doctor`, `doctor --self-test`, `demo`, optional production
+`proxy --monitor-socket`, disconnect invalidation, and a repeatable Fedora 44
+systemd user-service bootstrap. README and ADR 0009 describe invocation, cleanup,
+prerequisites and trust boundaries. Native release checks now exercise all three
+diagnostic commands. AGENTS.md is unchanged (199 lines). Existing untracked
+owner documents were left untouched and excluded from this commit.
+
+Verification:
+- Context7: Tokio cancellation/select, systemd delegation/subgroups/controllers.
+- Full scripts/check-release.sh passed: locked fetch, formatting, all-target
+  Clippy with denied warnings, workspace tests, release build, help/policy check,
+  native isolation/memory/lifecycle tests, adversarial real CLI and latency gates.
+- Additional production IPC/audit test passed: no intent before owner decision,
+  one-use approval and refusal after disconnect/replay. Monitor tests cover
+  actual disconnect invalidation and the 25-second deadline.
+- Final formatting and all-target Clippy passed after the added production test
+  and monitor-enabled benchmark.
+- Fedora 44 real delegated scope: doctor, doctor --self-test and demo passed,
+  including outside read/symlink, write, Internet/Unix sockets, detached child
+  cleanup and SQLite intent failure through the production AuditGate.
+- Monitor-enabled full gate: 4,000 warmed packets, p99 351.135 us, max 813.131 us.
+  Full native CLI RTT: 2,000 samples, p99 0.679 ms, max 1.026 ms.
+- Bash syntax, extracted systemd unit verification and git diff whitespace passed.
+  systemd-analyze emitted environment socket-permission diagnostics but exited 0.
+- Checksum-verified gitleaks 8.30.1 found no leaks in fetched Git history;
+  the exact staged candidate is scanned before committing.
+
+Limits: bootstrap service installation was not applied to the owner's persistent
+user configuration; unit syntax and its cgroup mechanism were verified separately.
+It requires an active user manager, installed Python/bubblewrap, and Fedora 44.
+Other distributions refuse bootstrap; Linux runner platform support is unchanged.
+No frontend exists or changed, so browser/npm checks do not apply. Probes verify
+child confinement/cleanup rather than a blanket fork ban. Latency measurements
+exclude human approval, startup, arbitrary host contention and large messages.
+No exhaustive secret-detection or hard realtime guarantee is claimed.
+
+---
+
 # Handoff — 2026-10-30: audit A-03–A-07 security fixes
 
 ## Current result

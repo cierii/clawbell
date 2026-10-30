@@ -161,6 +161,12 @@ impl Monitor {
                 continue;
             }
             let _ = self.connection(stream).await;
+            // Disconnect invalidates every rendezvous before accepting another owner.
+            self.state
+                .lock()
+                .map_err(|_| Error::Denied)?
+                .pending
+                .clear();
         }
     }
     async fn connection(&self, stream: UnixStream) -> Result<(), Error> {
@@ -298,6 +304,63 @@ mod tests {
             .send(false)
             .unwrap();
         assert!(task.await.unwrap().is_err());
+    }
+    #[tokio::test]
+    async fn disconnect_denies_pending_and_reconnect_cannot_reuse() {
+        use std::os::unix::fs::PermissionsExt;
+        let monitor = Monitor::new().unwrap();
+        let root = std::env::temp_dir().join(format!("clawbell-disconnect-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("monitor.sock");
+        let other = monitor.clone();
+        let endpoint = path.clone();
+        let server = tokio::spawn(async move { other.serve(&endpoint).await });
+        let stream = loop {
+            if let Ok(stream) = UnixStream::connect(&path).await {
+                break stream;
+            }
+            tokio::task::yield_now().await;
+        };
+        let mut reader = BufReader::new(stream);
+        // Observe an event to synchronize subscription before requesting approval.
+        loop {
+            if monitor.events.receiver_count() > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let other = monitor.clone();
+        let call = tokio::spawn(async move { other.approve(json!({"tool":"synthetic"})).await });
+        let mut buffer = Vec::new();
+        let bytes = frame(&mut reader, &mut buffer).await.unwrap();
+        let event: Event = serde_json::from_slice(&bytes).unwrap();
+        drop(reader);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), call)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            !monitor
+                .state
+                .lock()
+                .unwrap()
+                .pending
+                .contains_key(&event.id)
+        );
+        server.abort();
+        let _ = server.await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn approval_deadline_denies_and_removes_sender() {
+        let monitor = Monitor::new().unwrap();
+        let _owner = monitor.events.subscribe();
+        assert!(monitor.approve(json!({"tool":"synthetic"})).await.is_err());
+        assert!(monitor.state.lock().unwrap().pending.is_empty());
     }
     #[tokio::test]
     async fn frame_limits_and_eof() {

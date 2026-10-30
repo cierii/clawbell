@@ -123,10 +123,9 @@ The example policy is owner configuration, not an upstream annotation.
 The launcher explicitly allows initialization, ping, tool enumeration, policy-gated
 tool calls and cancellation. Resources, prompts, sampling, elicitation, reverse
 capabilities and other notifications deny; injected resources are stopped before
-retrieval. `require_approval` denies because this MVP launcher does not attach the
-optional monitor server. The library monitor/one-use approval integration remains
-available; `clawbell monitor --socket PATH` connects an existing owner-private IPC
-endpoint. There is no web panel, HTTP listener or token initialization in this MVP.
+retrieval. `require_approval` uses the optional `proxy --monitor-socket PATH`
+endpoint; without a connected owner it denies. `clawbell monitor --socket PATH`
+connects that owner-private IPC endpoint. There is no web panel, HTTP listener or token initialization in this MVP.
 
 Tool catalogs use persistent TOFU pins covering names, descriptions, schemas and
 metadata. Changed catalogs or list-change notifications terminate the session;
@@ -224,3 +223,44 @@ Technical contracts: [rmcp](https://github.com/modelcontextprotocol/rust-sdk),
 [bubblewrap](https://github.com/containers/bubblewrap),
 [ADR 0003](docs/adr/0003-policy-baseline-memory.md),
 [ADR 0005](docs/adr/0005-owner-ipc-approvals.md).
+
+## Host diagnostics and approval monitor
+
+The supported bootstrap target is **Fedora Linux 44**, with an active systemd
+user session, Python 3 and bubblewrap supporting `--ro-bind-fd` and
+`--disable-userns`. Run `bash scripts/bootstrap-fedora-44.sh` as the owner.
+It installs an idempotent user service, keeps its supervisor in a separate
+subgroup and enables only cpu/memory/pids delegation. Existing different unit
+contents refuse replacement. No root or global namespace settings are changed.
+Use the printed cgroup path for clients and diagnostics. The service must remain
+running while clients use it. Stop clients before removing it with
+`systemctl --user disable --now clawbell-delegation.service`, then remove the
+managed unit and run `systemctl --user daemon-reload`. Login persistence follows
+the host user-manager lifecycle; unattended boot requires owner/admin-managed
+lingering, which this script does not enable.
+
+```bash
+clawbell doctor --cgroup-parent /sys/fs/cgroup/your-delegation
+clawbell doctor --self-test --cgroup-parent /sys/fs/cgroup/your-delegation
+clawbell demo --cgroup-parent /sys/fs/cgroup/your-delegation
+```
+
+`doctor` exercises actual native startup. `--self-test` and `demo` additionally
+use disposable synthetic fixtures to verify outside-mount reads (including a
+symlink), read-only workspace writes, Internet/Unix socket denial, detached
+child cleanup after cancellation, and refusal to forward when SQLite rejects
+an audit intent. Processes can fork within their task budget; the child check
+verifies confinement and removal, not a blanket fork ban. Missing prerequisites
+or any failed assertion exit 1; nothing is silently skipped. Python is required
+for these active probes. Temporary files are private and removed on exit.
+
+For interactive approval, add `--monitor-socket /private/directory/session.sock`
+to `clawbell proxy` and connect from another terminal with
+`clawbell monitor --socket /private/directory/session.sock`. The parent must be
+owner-private 0700 and outside workspace/runtime mounts. Use one unique socket
+per proxy session. Existing endpoints refuse replacement; after the proxy exits,
+remove the stale socket explicitly. The installer does not add this optional
+flag automatically. Only policy `require_approval` calls wait for approval;
+missing owner, disconnect, rejection or the 25-second deadline deny. Replies
+apply once to the suspended call and cannot override any independent deny.
+Human wait and native startup are excluded from the packet latency budget.

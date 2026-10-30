@@ -94,3 +94,20 @@ fn init_fake_cgroup_refuses_without_binding_backups_or_upstream_execution() -> R
     fs::remove_dir_all(root)?;
     result
 }
+
+#[test]
+fn diagnostics_fail_closed_without_real_delegation() -> Result {
+    for command in ["doctor", "demo"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_clawbell"))
+            .args([
+                command,
+                "--cgroup-parent",
+                "/nonexistent-synthetic-delegation",
+            ])
+            .output()?;
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!String::from_utf8(output.stdout)?.contains("passed"));
+        assert!(!String::from_utf8(output.stderr)?.contains("nonexistent-synthetic"));
+    }
+    Ok(())
+}

@@ -209,7 +209,13 @@ async fn attack_5_resource_prompt_injection_is_not_forwarded() -> Result<()> {
 #[ignore = "explicit release storage/latency experiment; not a real-time guarantee"]
 async fn complete_mvp_gate_packets_under_five_ms() -> Result<()> {
     let dir = Directory::new()?;
-    let mut proxy = gate(&dir).await?;
+    let mut proxy = compose_monitor(
+        policy()?,
+        BaselineStore::open(&dir.0).await?,
+        OperationStore::open(&dir.0, "a".repeat(64)).await?,
+        "synthetic-owner-upstream".into(),
+        Some(clawbell_proxy::monitor::Monitor::new()?),
+    )?;
     catalog(&mut proxy, "Read notes").await?;
     call(&mut proxy, "read_file", json!({"path":"notes/public.txt"})).await??;
     proxy.inspect(Direction::Server, &packet(&json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"TEST_TOKEN=synthetic-benchmark-secret"}]}}), Direction::Server)?).await?;
@@ -235,7 +241,7 @@ async fn complete_mvp_gate_packets_under_five_ms() -> Result<()> {
     durations.sort_unstable();
     let maximum = *durations.last().ok_or("no_measurements")?;
     eprintln!(
-        "MVP policy/schema/DLP/durable-audit encode/parse: {} packets, p99 {:?}, max {:?}",
+        "MVP policy/schema/DLP/monitor/durable-audit encode/parse: {} packets, p99 {:?}, max {:?}",
         durations.len(),
         durations[durations.len() * 99 / 100],
         maximum
@@ -534,5 +540,87 @@ async fn terminal_audit_failure_still_closes_gate_and_pending_operations() -> Re
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn production_monitor_approval_precedes_durable_intent_and_is_one_use() -> Result<()> {
+    use clawbell_proxy::monitor::{Command, Event, Monitor, frame};
+    use tokio::{
+        io::{AsyncWriteExt, BufReader},
+        net::UnixStream,
+    };
+    let dir = Directory::new()?;
+    let monitor = Monitor::new()?;
+    let socket = dir.0.join("monitor.sock");
+    let other = monitor.clone();
+    let endpoint = socket.clone();
+    let server = tokio::spawn(async move { other.serve(&endpoint).await });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let stream = UnixStream::connect(socket).await?;
+    let (read, mut write) = stream.into_split();
+    let mut reader = BufReader::new(read);
+    let owner_policy = Arc::new(Policy::parse(
+        r#"
+version = "production-approval"
+[[tools]]
+name = "read_file"
+effect = "read"
+paths = ["/path"]
+[[rules]]
+tool = "read_file"
+decision = "require_approval"
+"#,
+    )?);
+    let mut proxy = compose_monitor(
+        owner_policy,
+        BaselineStore::open(&dir.0).await?,
+        OperationStore::open(&dir.0, "a".repeat(64)).await?,
+        "synthetic".into(),
+        Some(monitor),
+    )?;
+    catalog(&mut proxy, "synthetic").await?;
+    let before = audit_rows(&dir)?.len();
+    let request = packet(
+        &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"notes/a"}}}),
+        Direction::Client,
+    )?;
+    let pending = tokio::spawn(async move {
+        let result = proxy.inspect(Direction::Client, &request).await;
+        (proxy, result.is_ok())
+    });
+    let mut buffer = Vec::new();
+    let event = loop {
+        let event: Event = serde_json::from_slice(&frame(&mut reader, &mut buffer).await?)?;
+        if event.id != 0 {
+            break event;
+        }
+    };
+    assert_eq!(audit_rows(&dir)?.len(), before);
+    let mut command = serde_json::to_vec(&Command {
+        id: event.id,
+        allow: true,
+    })?;
+    command.push(b'\n');
+    write.write_all(&command).await?;
+    let (mut proxy, result) = pending.await?;
+    assert!(result);
+    assert_eq!(audit_rows(&dir)?.len(), before + 1);
+    // Replay cannot grant a new call, and disconnection denies the next one.
+    write.write_all(&command).await?;
+    drop(write);
+    drop(reader);
+    assert!(
+        call(&mut proxy, "read_file", json!({"path":"notes/b"}))
+            .await?
+            .is_err()
+    );
+    server.abort();
+    let _ = server.await;
     Ok(())
 }

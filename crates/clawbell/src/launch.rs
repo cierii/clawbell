@@ -15,6 +15,9 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 #[derive(clap::Args)]
 pub struct Options {
+    /// Optional private owner IPC socket, outside all runner mounts.
+    #[arg(long)]
+    pub monitor_socket: Option<PathBuf>,
     /// Absolute owner policy path, not supplied by an MCP server.
     #[arg(long)]
     pub policy: PathBuf,
@@ -158,7 +161,7 @@ pub async fn run(options: Options) -> Result<()> {
     let baseline = BaselineStore::open(&state).await?;
     let launch = store.record(0, Outcome::Intent).await?;
     let config = NativeConfig {
-        workspace,
+        workspace: workspace.clone(),
         executable: options.command.first().ok_or("command_required")?.clone(),
         arguments: options.command.iter().skip(1).cloned().collect(),
         cgroup_parent: options.cgroup_parent,
@@ -173,15 +176,51 @@ pub async fn run(options: Options) -> Result<()> {
             return Err(e.into());
         }
     };
-    let mut gate = compose(policy, baseline, store.clone(), identity)?;
-    let result = clawbell_proxy::stdio::run(
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-        &mut gate,
-        &mut runner,
-        Limits::default(),
-    )
-    .await;
+    let monitor = clawbell_proxy::monitor::Monitor::new()?;
+    let endpoint = if let Some(path) = options.monitor_socket {
+        files::trusted(path.parent().ok_or("monitor_parent_required")?)?;
+        let parent = std::fs::canonicalize(path.parent().ok_or("monitor_parent_required")?)?;
+        if parent.starts_with(&workspace)
+            || ["/usr", "/etc", "/var"]
+                .iter()
+                .any(|p| parent.starts_with(p))
+        {
+            return Err("monitor_exposed_to_runner".into());
+        }
+        Some(path)
+    } else {
+        None
+    };
+    let mut gate = compose_monitor(
+        policy,
+        baseline,
+        store.clone(),
+        identity,
+        endpoint.as_ref().map(|_| monitor.clone()),
+    )?;
+    let server = async {
+        if let Some(path) = &endpoint {
+            monitor.serve(path).await
+        } else {
+            std::future::pending().await
+        }
+    };
+    let result = {
+        let session = clawbell_proxy::stdio::run(
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+            &mut gate,
+            &mut runner,
+            Limits::default(),
+        );
+        tokio::pin!(session);
+        tokio::select! {
+            biased;
+            _ = server => Err(Error::Denied),
+            result = &mut session => result,
+        }
+    };
+    clawbell_sandbox::Runner::terminate(&mut runner).await?;
     // A session/launch is not a successful operation just because pipes closed.
     store.record(launch, Outcome::Unknown).await?;
     match result {
@@ -233,17 +272,32 @@ impl<G: Gate> Gate for SessionGate<G> {
         self.inner.finish().await
     }
 }
+#[cfg(test)]
 fn compose(
     policy: Arc<Policy>,
     baseline: BaselineStore,
     store: OperationStore,
     identity: String,
 ) -> Result<impl Gate> {
+    compose_monitor(policy, baseline, store, identity, None)
+}
+fn compose_monitor(
+    policy: Arc<Policy>,
+    baseline: BaselineStore,
+    store: OperationStore,
+    identity: String,
+    monitor: Option<clawbell_proxy::monitor::Monitor>,
+) -> Result<impl Gate> {
     let audit = AuditGate {
         store: store.clone(),
         pending: HashMap::new(),
     };
     let gate = PolicyGate::new(audit, policy, baseline, identity)?;
+    let gate = if let Some(monitor) = monitor {
+        gate.with_monitor(monitor)
+    } else {
+        gate
+    };
     Ok(SessionGate {
         inner: LocalVaultGate::new(gate, Vec::new(), Limits::default().message_bytes)?,
         store,
@@ -252,3 +306,23 @@ fn compose(
 #[cfg(test)]
 #[path = "attack_tests.rs"]
 mod tests;
+
+/// Exercise the actual forwarding gate against an intentionally unavailable writer.
+pub(crate) async fn verify_audit_refusal(store: OperationStore) -> Result<()> {
+    let mut gate = AuditGate {
+        store,
+        pending: HashMap::new(),
+    };
+    let message = Envelope::parse(
+        br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+        Direction::Client,
+        Limits::default().message_bytes,
+    )?;
+    if !matches!(
+        gate.inspect(Direction::Client, &message).await,
+        Err(Error::Refused(Reason::AuditUnavailable))
+    ) {
+        return Err("audit_loss_probe_failed".into());
+    }
+    Ok(())
+}

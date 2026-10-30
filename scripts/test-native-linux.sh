@@ -11,3 +11,6 @@ cargo test -p clawbell-sandbox --locked --test native -- --ignored --nocapture
 cargo test -p clawbell-proxy --release --locked --test native_runner -- --ignored --nocapture
 cargo build --release --locked -p clawbell
 python3 scripts/test-mvp-cli.py
+target/release/clawbell doctor --cgroup-parent "$parent"
+target/release/clawbell doctor --self-test --cgroup-parent "$parent"
+target/release/clawbell demo --cgroup-parent "$parent"
