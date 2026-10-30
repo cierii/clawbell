@@ -109,7 +109,7 @@ Nie gwarantuje rozpoznania każdej manipulacji ani ochrony operacji omijających
 - Zastępuj sekret stabilnym w obrębie sesji, nieodwracalnym identyfikatorem, bez ujawniania wartości.
 - Jeśli redakcja psuje schemat lub znaczenie argumentów, odmawiaj zamiast wykonywać zmienioną operację.
 - Poświadczenia dla zatwierdzonego upstreamu wstrzykuj tylko w adapterze docelowym.
-- Nie przekazuj poświadczeń do modelu, panelu ani innych serwerów; nie odtwarzaj sekretów z tekstu narzędzia.
+- Nie przekazuj poświadczeń do modelu, panelu ani innych serwerów; odtwarzanie znaczników wyłącznie dla jawnie autoryzowanego lokalnego upstreamu według `docs/adr/0002-in-flight-dlp.md`.
 - Buforuj pełną jednostkę podlegającą inspekcji przed wysłaniem; uwzględniaj sekrety dzielone na fragmenty.
 - Przekroczenie limitu bufora lub nieobsługiwany format oznacza odmowę albo jawne odrzucenie pola.
 - Audyt zawiera identyfikator korelacji, czas UTC, wersję polityki, decyzję i wynik bez surowych danych.

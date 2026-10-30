@@ -33,6 +33,13 @@ struct FixtureGate {
     seen: usize,
 }
 impl Gate for FixtureGate {
+    fn validate_local_arguments(&self, tool: &str, arguments: &Value) -> Result<(), Error> {
+        if tool == "connect" && arguments.get("password").is_some_and(Value::is_string) {
+            Ok(())
+        } else {
+            Err(Error::Denied)
+        }
+    }
     async fn inspect(
         &mut self,
         _direction: Direction,
@@ -568,4 +575,94 @@ fn sdk_custom_fallback_cannot_accept_malformed_known_methods() {
     ] {
         assert!(parse(&v, Direction::Client).is_err());
     }
+}
+
+#[tokio::test]
+async fn env_response_is_vaulted_and_local_arguments_are_restored() -> TestResult {
+    use clawbell_proxy::dlp::LocalVaultGate;
+    let (client, c) = tokio::io::duplex(65536);
+    let (s, server) = tokio::io::duplex(65536);
+    let (cr, cw) = tokio::io::split(c);
+    let (sr, sw) = tokio::io::split(s);
+    let proxy = tokio::spawn(async move {
+        let mut gate = LocalVaultGate::new(FixtureGate::default(), vec!["connect".into()], 65536)?;
+        stdio::relay(cr, cw, sr, sw, &mut gate, Limits::default()).await
+    });
+    let (r, mut w) = tokio::io::split(client);
+    let mut r = BufReader::new(r);
+    let (sr, mut sw) = tokio::io::split(server);
+    let mut sr = BufReader::new(sr);
+    send(&mut w, &init()).await?;
+    recv(&mut sr).await?;
+    send(&mut sw, &init_result()).await?;
+    recv(&mut r).await?;
+    send(&mut w, &initialized()).await?;
+    recv(&mut sr).await?;
+    send(&mut w, &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_env","arguments":{}}})).await?;
+    recv(&mut sr).await?;
+    // Synthetic .env file returned by the fake MCP server, fragmented on wire.
+    let secret = "synthetic-database-password";
+    let response = json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":format!("PASSWORD={secret}\nPORT=5432\n")} ]}});
+    let wire = serde_json::to_vec(&response)?;
+    for chunk in wire.chunks(3) {
+        sw.write_all(chunk).await?;
+    }
+    sw.write_all(b"\n").await?;
+    let masked = recv(&mut r).await?;
+    assert!(!masked.to_string().contains(secret));
+    let text = masked
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .ok_or("missing text")?;
+    let token = text
+        .strip_prefix("PASSWORD=")
+        .and_then(|s| s.split('\n').next())
+        .ok_or("missing token")?;
+    assert!(token.starts_with("[clawbell:"));
+    send(&mut w, &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"connect","arguments":{"password":token}}})).await?;
+    let restored = recv(&mut sr).await?;
+    assert_eq!(
+        restored.pointer("/params/arguments/password"),
+        Some(&json!(secret))
+    );
+    drop(r);
+    drop(w);
+    let _ = proxy.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn vault_denies_wrong_tool_forgery_raw_secrets_and_finished_session() -> TestResult {
+    use clawbell_proxy::dlp::LocalVaultGate;
+    let mut gate = LocalVaultGate::new(FixtureGate::default(), vec!["connect".into()], 65536)?;
+    let response = parse(
+        &json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"PASSWORD=synthetic-value"}]}}),
+        Direction::Server,
+    )?;
+    let masked = gate.inspect(Direction::Server, &response).await?;
+    let token = masked
+        .value()
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .and_then(|s| s.strip_prefix("PASSWORD="))
+        .ok_or("missing token")?;
+    for (tool, password) in [
+        ("other", token),
+        ("connect", "[clawbell:forged]"),
+        ("connect", "PASSWORD=raw-value"),
+    ] {
+        let request = parse(
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":{"password":password}}}),
+            Direction::Client,
+        )?;
+        assert!(gate.inspect(Direction::Client, &request).await.is_err());
+    }
+    let request = parse(
+        &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"connect","arguments":{"password":token}}}),
+        Direction::Client,
+    )?;
+    gate.finish().await?;
+    assert!(gate.inspect(Direction::Client, &request).await.is_err());
+    assert!(!gate.permits_remote());
+    Ok(())
 }

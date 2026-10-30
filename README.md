@@ -90,3 +90,29 @@ operacji na dowolnym hoście.
 Specyfikacje: [transporty MCP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
 [cykl życia](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle),
 [oficjalny SDK rmcp](https://github.com/modelcontextprotocol/rust-sdk).
+
+## In-Flight DLP Vault
+
+`clawbell_core::dlp::{Vault, Scanner}` udostępniają ograniczoną redakcję UTF-8
+oraz szyfrowany skarbiec sesji. `Scanner::push` przyjmuje dowolne fragmenty,
+a `finish` zwraca wyłącznie wynik po inspekcji. `Vault::register` pozwala jawnie
+zarejestrować sekrety nierozpoznawane przez wzorce. Wzorce obejmują PEM, SSH,
+wybrane klucze API, URI baz danych i wartości credential w .env.
+
+`clawbell_proxy::dlp::LocalVaultGate` składa DLP z istniejącym Gate dla jednego
+lokalnego upstreamu. Właściciel przekazuje listę narzędzi uprawnionych do używania
+znaczników. Gate musi zaimplementować `validate_local_arguments` i sprawdzić
+odtworzone argumenty względem przypiętych schematów i polityki, bez logowania
+sekretów; domyślna implementacja odmawia. Audyt otrzymuje znaczniki. Adapter HTTP
+odrzuca LocalVaultGate. Po zakończeniu sesji vault jest usuwany.
+
+Test `.env` znajduje się w `crates/proxy/tests/transports.rs`. Eksperyment DLP:
+
+```bash
+cargo test -p clawbell-core --release --locked dlp_packet_under_five_ms -- --ignored --nocapture
+```
+
+Mierzy rozgrzaną inspekcję i odtwarzanie 2274 bajtów w fragmentach, z 64
+zarejestrowanymi sekretami, bez audytu, procesu i sieci. Nie stanowi
+gwarancji <5 ms pełnego proxy ani dowolnej wielkości pakietu. Ograniczenia pamięci,
+heurystyk i migrację opisuje [ADR 0002](docs/adr/0002-in-flight-dlp.md).

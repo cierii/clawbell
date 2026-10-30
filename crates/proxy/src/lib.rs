@@ -15,6 +15,7 @@
 //! }
 //! ```
 
+pub mod dlp;
 pub mod http;
 pub mod protocol;
 pub mod stdio;
@@ -106,6 +107,21 @@ pub enum Error {
 /// Errors, approval requirements and audit failures MUST return `Error::Denied`.
 /// No default implementation exists, so missing security adapters fail closed.
 pub trait Gate: Send {
+    /// Validate resolved local arguments against pinned schemas and destination
+    /// policy without logging or auditing plaintext. Default denies restoration.
+    /// # Errors
+    /// Denies unless the adapter explicitly validates the resolved arguments.
+    fn validate_local_arguments(
+        &self,
+        _tool: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<(), Error> {
+        Err(Error::Denied)
+    }
+    /// Whether this adapter may be attached to a remote transport.
+    fn permits_remote(&self) -> bool {
+        true
+    }
     /// Inspect one complete, validated message. Never log its raw contents.
     fn inspect(
         &mut self,

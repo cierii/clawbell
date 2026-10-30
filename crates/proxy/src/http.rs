@@ -253,6 +253,9 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
     G: Gate,
 {
+    if !gate.permits_remote() {
+        return Err(Error::Denied);
+    }
     let limits = limits.validate()?;
     let (events, incoming) = mpsc::channel(limits.queue);
     let (client_tx, client_rx) = mpsc::channel(limits.queue);
