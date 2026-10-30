@@ -218,7 +218,7 @@ async fn complete_mvp_gate_packets_under_five_ms() -> Result<()> {
             Direction::Client,
         )?;
         let response = packet(
-            &json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"synthetic public note"}]}}),
+            &json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"synthetic public note"},{"type":"resource","resource":{"uri":"fixture://note","mimeType":"text/plain","text":"public embedded note"}}],"structuredContent":{"count":42,"flags":[true,false,null,1.25]}}}),
             Direction::Server,
         )?;
         for (direction, envelope) in [(Direction::Client, request), (Direction::Server, response)] {
@@ -239,5 +239,62 @@ async fn complete_mvp_gate_packets_under_five_ms() -> Result<()> {
         maximum
     );
     assert!(maximum < std::time::Duration::from_millis(5));
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_a01_known_numeric_secret_is_not_returned() -> Result<()> {
+    let dir = Directory::new()?;
+    let mut proxy = gate(&dir).await?;
+    catalog(&mut proxy, "Read notes").await?;
+    assert!(
+        call(&mut proxy, "read_file", json!({"path":"notes/public.txt"}))
+            .await?
+            .is_ok()
+    );
+    let learned = proxy.inspect(Direction::Server, &packet(&json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"TEST_TOKEN=123456789"}]}}), Direction::Server)?).await?;
+    assert!(!String::from_utf8(learned.encode()?)?.contains("123456789"));
+    let request = packet(
+        &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"notes/public.txt"}}}),
+        Direction::Client,
+    )?;
+    proxy.inspect(Direction::Client, &request).await?;
+    let response = packet(
+        &json!({"jsonrpc":"2.0","id":3,"result":{"structuredContent":{"PASSWORD":123_456_789}}}),
+        Direction::Server,
+    )?;
+    assert!(matches!(
+        proxy.inspect(Direction::Server, &response).await,
+        Err(Error::Denied)
+    ));
+    proxy.finish().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_a02_embedded_binary_is_not_returned() -> Result<()> {
+    let dir = Directory::new()?;
+    for block in [
+        json!({"type":"resource","resource":{"uri":"fixture://blob","mimeType":"application/octet-stream","blob":"VEVTVF9UT0tFTj0xMjM0NTY3ODk="}}),
+        json!({"type":"image","mimeType":"image/png","data":"VEVTVF9UT0tFTj0xMjM0NTY3ODk="}),
+        json!({"type":"audio","mimeType":"audio/wav","data":"VEVTVF9UT0tFTj0xMjM0NTY3ODk="}),
+    ] {
+        let mut proxy = gate(&dir).await?;
+        catalog(&mut proxy, "Read notes").await?;
+        assert!(
+            call(&mut proxy, "read_file", json!({"path":"notes/public.txt"}))
+                .await?
+                .is_ok()
+        );
+        let response = packet(
+            &json!({"jsonrpc":"2.0","id":2,"result":{"content":[block]}}),
+            Direction::Server,
+        )?;
+        assert!(matches!(
+            proxy.inspect(Direction::Server, &response).await,
+            Err(Error::Denied)
+        ));
+        proxy.finish().await?;
+    }
     Ok(())
 }

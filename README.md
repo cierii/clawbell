@@ -128,7 +128,18 @@ server-code changes with unchanged metadata. Server identity is bound to the
 owner name, workspace, command and arguments; installer names also include the
 client configuration's path digest.
 
-DLP inspects complete bounded UTF-8 messages in both directions. Outgoing requests
+DLP inspects complete bounded UTF-8 messages in both directions. JSON numbers,
+booleans and null are inspected in their serialized representation, including
+credential field context; detecting a secret denies the whole message to preserve
+the scalar's type and meaning. Result content accepts only text blocks and inline
+text resources with no MIME type, `text/plain`, or `text/markdown`. Binary blobs
+(including blobs labelled as text), images, audio, resource links, unknown content
+variants/fields and other resource MIME types deny before the inner policy/audit
+gate. The same format checks cover resource-read and prompt-message results in
+library integrations; the CLI still denies those methods. Structured JSON remains
+subject to recursive scalar inspection, not arbitrary Base64 decoding.
+
+Outgoing requests
 with detected raw secrets refuse rather than changing argument semantics. Server
 results are redacted before entering the inner gate. Secret patterns are heuristic;
 the launcher does not enable credential injection or marker restoration. Library

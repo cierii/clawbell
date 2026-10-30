@@ -1,3 +1,48 @@
+# Handoff — 2026-10-30: audit A-01 / A-02 DLP fixes
+
+## Current result
+
+LocalVaultGate now inspects JSON numbers, booleans and null recursively in both
+directions, with credential field context. Secret-bearing scalars refuse without
+type conversion or an inner gate call. Server result blocks allow only text and
+inline text resources (absent MIME, text/plain, text/markdown); unsupported binary,
+image/audio/link/unknown/mixed formats refuse before redaction and the inner gate.
+Tool, resource-read and prompt result carriers are covered. No general encoded
+secret detection or binary decoder was added. See ADR 0007 for migration/limits.
+
+Changes: crates/proxy/src/dlp.rs, crates/clawbell/src/attack_tests.rs, README.md,
+docs/adr/0007-dlp-scalar-and-content-inspection.md and this handoff. Existing
+untracked audit and launch documents were preserved and excluded from the commit.
+AGENTS.md, dependencies and lockfile are unchanged.
+
+## Verification
+
+- Context7: serde_json Value/scalar serialization and official rmcp content/resource
+  contracts. Both production regressions fail against the previous implementation
+  and pass after the fix. Four boundary tests cover refusal before the inner gate,
+  both directions, nested scalars, public type preservation, misleading MIME,
+  mixed/unsupported blocks and allowed text resource redaction.
+- scripts/check-local.sh passed: locked fetch, fmt, Clippy all targets/-D warnings,
+  workspace tests, release build, CLI help and policy validation. Initial socket
+  failures in the restricted tool environment were resolved by running the same
+  checks outside that restriction; no product controls or tests were weakened.
+- Expanded production gate benchmark: 4,000 warmed packets including inline text
+  resources and structured scalars, p99 218.474 us, max 622.019 us (<5 ms each).
+- Native Linux suite passed via delegated systemd scope: SSH isolation/lifecycle,
+  2,000 transport RTTs (max 146.297 us), five real CLI attacks with unchanged
+  synthetic host/memory fixtures, 2,000 full CLI/native/audit/DLP/policy RTTs
+  (p99 0.615 ms, max 1.476 ms). Explicit agent-memory protection also passed.
+- Checksum-verified gitleaks 8.30.1 scanned fetched Git history and documentation
+  with no findings. The exact staged candidate is scanned before commit.
+- git diff --check and documentation links checked; AGENTS.md stays at 199 lines.
+  No frontend exists or changed, so npm/browser checks do not apply.
+
+Performance results describe warmed bounded packets on this host, not a hard
+real-time guarantee under arbitrary load or for maximum-size messages. Remaining
+audit findings are outside this task. GitHub CI must validate the pushed commit.
+
+---
+
 # Handoff — 2026-10-30: installer, skill inspector and Linux MVP
 
 ## Delivered
