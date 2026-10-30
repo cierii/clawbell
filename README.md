@@ -93,6 +93,50 @@ for mount setup. Shell authorization is separate. No insecure launcher or
 production allow-all gate is provided. Processes started outside a controlled
 runner and remote MCP processes remain outside filesystem enforcement.
 
+## Native OS runner
+
+`clawbell_sandbox::native::NativeRunner` implements the existing `Runner` interface
+on Linux (x86-64/AArch64). Pass owner-authorized `NativeConfig` with an absolute
+credential-free workspace, `/usr/bin/` executable, literal argument vector,
+resource limits and a trusted delegated cgroups v2 parent to `NativeRunner::new`,
+then supply it to `clawbell_proxy::stdio::run` with the mandatory audited Gate.
+No CLI launch command or permissive production Gate is added.
+
+Linux requires bubblewrap with `--ro-bind-fd` and nested-userns disabling, unprivileged namespaces,
+`close_range(CLOSE_RANGE_CLOEXEC)`, seccomp and a delegated cgroup v2 subtree with cpu/memory/pids controllers enabled.
+The child joins its cgroup before exec. All persistent mounts are read-only;
+network sockets and privileged syscalls are denied. No home, SSH agent, credentials,
+host socket or cgroup filesystem is exposed. Stdin/stdout carry MCP; stderr must
+be consumed by the bounded transport drain. Cancellation, Drop and an absolute
+session deadline kill the complete cgroup, including detached grandchildren.
+Missing kernel facilities fail closed, never fall back to a direct process.
+
+**macOS is not complete:** `macos::profile` provides a deny-default Seatbelt
+component and a native direct-syscall test, but production `NativeRunner` refuses
+macOS until resource enforcement and lifecycle supervision are implemented and
+verified. Profile unit tests on Linux do not certify macOS kernel enforcement.
+See [ADR 0004](docs/adr/0004-native-process-containment.md).
+
+Run real Linux attack, lifecycle and release packet measurements in a fresh user
+scope (systemd is a test delegation helper, not a production dependency):
+
+```bash
+systemd-run --user --scope -p Delegate=yes bash scripts/test-native-linux.sh
+```
+
+The test creates an existing **synthetic** SSH key outside the mounted workspace.
+A malicious MCP peer attempts direct `os.open`, `cat` and symlink reads, persistent
+writes and socket creation; all must fail. Lifecycle tests cover detached children,
+explicit termination, Drop and deadline expiry. Missing delegation fails the test.
+The release experiment measures 2000 warmed proxy/native-runner ping round trips,
+asserting each below 5 ms. Process startup and a production Gate's audit/DLP/policy
+costs are excluded; this is a scoped measurement, not a hard real-time guarantee.
+On an actual macOS host, the Seatbelt component test is:
+
+```bash
+cargo test -p clawbell-sandbox --locked --test macos -- --ignored --nocapture
+```
+
 ## Transport and DLP integration
 
 - `stdio::run` requires a trusted `Runner`; `stdio::relay` connects existing I/O.

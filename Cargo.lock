@@ -266,6 +266,7 @@ name = "clawbell-sandbox"
 version = "0.1.0"
 dependencies = [
  "clawbell-core",
+ "libc",
  "thiserror",
  "tokio",
 ]

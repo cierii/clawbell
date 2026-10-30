@@ -28,7 +28,7 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 futures-util = "0.3"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
