@@ -26,6 +26,7 @@ pub mod stdio;
 
 use std::{future::Future, time::Duration};
 
+pub use clawbell_audit::operations::Reason;
 pub use protocol::{Direction, Envelope, Phase, Session};
 
 /// Transport limits are enforced before inspection and before forwarding.
@@ -89,6 +90,9 @@ pub enum Error {
     /// Policy or durable audit refused the operation.
     #[error("inspection_denied")]
     Denied,
+    /// A security boundary refused with a fixed, payload-free reason.
+    #[error("{0:?}")]
+    Refused(Reason),
     /// Transport failed; raw I/O details are intentionally not exposed.
     #[error("transport_failed_outcome_unknown")]
     Transport,
@@ -100,6 +104,24 @@ pub enum Error {
     Closed,
 }
 
+impl Error {
+    /// Fixed audit reason, without formatting any transport or peer data.
+    #[must_use]
+    pub const fn reason(&self) -> Reason {
+        match self {
+            Self::InvalidMessage => Reason::InvalidMessage,
+            Self::Protocol => Reason::Protocol,
+            Self::Limit => Reason::Limit,
+            Self::Timeout => Reason::Timeout,
+            Self::Denied => Reason::InspectionDenied,
+            Self::Refused(reason) => *reason,
+            Self::Transport => Reason::Transport,
+            Self::Cancelled => Reason::Cancelled,
+            Self::Closed => Reason::Closed,
+        }
+    }
+}
+
 /// Trusted security boundary, one instance per session with an immutable policy
 /// snapshot. Implementations MUST inspect both directions, validate pinned tool
 /// schemas and server identity, redact complete messages, reject semantic changes
@@ -107,7 +129,9 @@ pub enum Error {
 /// must durably record results; interrupted requests must become outcome unknown.
 ///
 /// A returned message may redact content, but cannot change IDs, method or kind.
-/// Errors, approval requirements and audit failures MUST return `Error::Denied`.
+/// Errors, approval requirements and audit failures MUST return a refusal. Override
+/// `terminated` to persist pre-inspection failures; `finish` must close pending work
+/// even if terminal auditing fails.
 /// No default implementation exists, so missing security adapters fail closed.
 pub trait Gate: Send {
     /// Validate resolved local arguments against pinned schemas and destination
@@ -131,6 +155,13 @@ pub trait Gate: Send {
         direction: Direction,
         message: &Envelope,
     ) -> impl Future<Output = Result<Envelope, Error>> + Send;
+    /// Audit a terminal transport error, including failures before inspection.
+    /// The callback receives only a fixed reason, never an invalid payload.
+    /// # Errors
+    /// A durable audit failure must remain a failure; no forwarding may resume.
+    fn terminated(&mut self, _reason: Reason) -> impl Future<Output = Result<(), Error>> + Send {
+        std::future::ready(Ok(()))
+    }
     /// Record session termination and outstanding operations as unknown.
     fn finish(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 }

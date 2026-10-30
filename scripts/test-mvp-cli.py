@@ -54,6 +54,23 @@ tool = "write_file"
 decision = "allow"
 ''')
 
+    # Binding checks real host isolation before modifying any client file. The
+    # server is deliberately /usr/bin/false: preflight must run its trusted probe.
+    config = root / "mcp.json"
+    original = json.dumps({"mcpServers": {"fixture": {"command": "/usr/bin/false"}}}).encode()
+    config.write_bytes(original)
+    binding = subprocess.run([
+        str(BINARY), "init", "--config", str(config), "--policy", str(policy),
+        "--workspace", str(workspace), "--state-dir", str(state), "--cgroup-parent", CGROUP,
+    ], capture_output=True, timeout=20)
+    assert binding.returncode == 0, "real host preflight and binding must succeed"
+    assert b"configuration_0_server_0: preflight_passed" in binding.stdout
+    assert b"configuration_0: bound" in binding.stdout
+    restored = subprocess.run([str(BINARY), "unbind", "--config", str(config)], capture_output=True, timeout=10)
+    assert restored.returncode == 0
+    assert config.read_bytes() == original
+    print("Real installer preflight passed without executing the configured upstream; exact config restored.")
+
     def start():
         return subprocess.Popen([
             str(BINARY), "proxy", "--policy", str(policy), "--workspace", str(workspace),

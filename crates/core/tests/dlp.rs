@@ -84,3 +84,34 @@ fn dlp_packet_under_five_ms() -> Result {
     assert!(times[1999] < std::time::Duration::from_millis(5));
     Ok(())
 }
+
+#[test]
+fn semantic_fragments_prefixes_unicode_limits_and_public_text() -> Result {
+    let mut vault = Vault::new(65536)?;
+    for secret in ["123456789", "ą🙂秘密"] {
+        vault.register(secret)?;
+        for (split, _) in secret.char_indices().skip(1) {
+            assert!(
+                vault
+                    .inspect_fragments(&[&secret[..split], &secret[split..]])
+                    .is_err()
+            );
+            // The first response must refuse before a future response can finish it.
+            assert!(vault.inspect_fragments(&[&secret[..split]]).is_err());
+        }
+        vault.inspect_fragments(&[secret])?;
+    }
+    vault.register("aaa")?;
+    assert!(vault.inspect_fragments(&["aaa", "a"]).is_err());
+    assert!(vault.inspect_fragments(&["aaaa"]).is_err());
+    vault.inspect_fragments(&["aaaaaa"])?;
+    vault.inspect_fragments(&["public ", "note"])?;
+    vault.inspect_fragments(&["", ""])?;
+    assert!(vault.inspect_fragments(&[&"x".repeat(65536), "x"]).is_err());
+    assert!(
+        vault
+            .inspect_fragments(&["TEST_TOKEN=synthetic-", "split-credential"])
+            .is_err()
+    );
+    Ok(())
+}

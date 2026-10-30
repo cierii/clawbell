@@ -56,11 +56,18 @@ PATH resolution, package installation and remote HTTP binding are not supported.
 Complete path arguments inside the selected workspace translate to `/workspace`;
 embedded paths such as `--file=/host/path` need explicit sandbox-compatible values.
 
+Before changing any selected configuration, `init` validates every server and
+exercises native isolation with a fixed trusted probe. It never executes an
+upstream for discovery. Per-server output contains only indices and a fixed
+preflight status; missing host prerequisites leave configs/backups untouched.
+Launch repeats isolation checks. See [ADR 0008](docs/adr/0008-fragments-audit-and-binding-preflight.md).
+
 For each file, `init` durably creates a **0600 `.bak`** and a hash-only
 `.clawbell.json` receipt before atomic replacement. The wrapper invokes the
 installed clawbell executable, with the explicit policy/workspace/state/cgroup
 settings and original executable/arguments. Repeating an unchanged installation
-is a no-op; changing CLI flags does not silently modify an existing binding.
+is a no-op; different settings refuse rather than silently changing or attesting
+to an existing binding.
 Install the binary at a stable path before binding. The CLI prints file indices
 and fixed statuses, never configuration contents or credentials.
 
@@ -139,8 +146,17 @@ gate. The same format checks cover resource-read and prompt-message results in
 library integrations; the CLI still denies those methods. Structured JSON remains
 subject to recursive scalar inspection, not arbitrary Base64 decoding.
 
-Outgoing requests
-with detected raw secrets refuse rather than changing argument semantics. Server
+Ordered tool-result text/inline-resource blocks are inspected together. A secret
+spanning blocks refuses the whole message. Text ending in any proper prefix of a
+known secret also refuses, preventing completion in a later response; this can
+reject innocent text, including one-character suffixes. Resource documents and
+prompt messages are separate units; arbitrary JSON fields are not concatenated.
+This does not detect secrets first learned after earlier output, arbitrary
+reordering/normalization or encodings. A catalog requiring redaction refuses before
+its first pin; existing pins are never silently reset. See
+[ADR 0008](docs/adr/0008-fragments-audit-and-binding-preflight.md).
+
+Outgoing requests with detected raw secrets refuse rather than changing argument semantics. Server
 results are redacted before entering the inner gate. Secret patterns are heuristic;
 the launcher does not enable credential injection or marker restoration. Library
 callers may explicitly register known secrets and use the narrower restoration
@@ -148,9 +164,12 @@ contract in [ADR 0002](docs/adr/0002-in-flight-dlp.md).
 
 A dedicated SQLite writer durably acknowledges every allowed request intent before
 forwarding and records inspected responses, protocol errors, denials and unknown
-outcomes. The audit contains UTC timestamps, generated correlation IDs, fixed
-codes and a policy digest; it stores no raw request IDs, paths, names, arguments or
-responses. Intent rows without a corresponding outcome mean **unknown**, including
+outcomes, including fixed terminal reasons for failures before gate inspection.
+The audit contains UTC timestamps, generated session/correlation IDs, an upstream
+digest, fixed denial reasons and a policy digest; it stores no raw request IDs, paths, names, arguments or
+responses. Responses must reference an intent in the same session. Existing audit
+schemas migrate additively; older rows retain explicit legacy identities/reasons.
+Intent rows without a corresponding outcome mean **unknown**, including
 a process crash. They are never replayed. Append-only triggers prevent routine
 updates/deletes, not a compromised owner/administrator. The database is bounded
 by 16,384 SQLite pages (normally 64 MiB); exhaustion stops new operations. No

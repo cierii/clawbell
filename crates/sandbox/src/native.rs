@@ -62,6 +62,57 @@ pub struct NativeRunner {
     inner: crate::linux::LinuxRunner,
 }
 impl NativeRunner {
+    /// Exercise the actual containment profile using only trusted `/usr/bin/true`.
+    /// The configured upstream is never executed. Temporary cgroups are reclaimed;
+    /// client files, workspace contents and persistent host settings are untouched.
+    /// # Errors
+    /// Refuses unavailable namespaces, bubblewrap flags, seccomp, descriptor setup,
+    /// controllers, resource limits, probe timeout or unsuccessful cleanup.
+    pub async fn preflight(mut config: NativeConfig) -> Result<(), LaunchError> {
+        // Validate the configured program without executing it or resolving PATH.
+        let executable = std::path::Path::new(&config.executable);
+        if !executable.starts_with("/usr/bin")
+            || executable
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || !executable.is_file()
+        {
+            return Err(LaunchError);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if executable
+                .metadata()
+                .map_err(|_| LaunchError)?
+                .permissions()
+                .mode()
+                & 0o111
+                == 0
+            {
+                return Err(LaunchError);
+            }
+        }
+        if config.arguments.len() > 256
+            || config.arguments.iter().map(String::len).sum::<usize>() > 131_072
+        {
+            return Err(LaunchError);
+        }
+        config.executable = "/usr/bin/true".into();
+        config.arguments.clear();
+        let mut runner = Self::new(config)?;
+        let probe = async {
+            let mut child = runner.spawn().await?;
+            child.wait().await.map_err(|_| LaunchError)
+        };
+        let status = tokio::time::timeout(Duration::from_secs(10), probe).await;
+        let cleanup = runner.terminate().await;
+        cleanup?;
+        if !status.map_err(|_| LaunchError)??.success() {
+            return Err(LaunchError);
+        }
+        Ok(())
+    }
     /// Prepare containment before starting any untrusted code.
     /// # Errors
     /// Missing isolation, invalid configuration and unsupported platforms refuse.

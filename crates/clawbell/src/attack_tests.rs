@@ -211,6 +211,8 @@ async fn complete_mvp_gate_packets_under_five_ms() -> Result<()> {
     let dir = Directory::new()?;
     let mut proxy = gate(&dir).await?;
     catalog(&mut proxy, "Read notes").await?;
+    call(&mut proxy, "read_file", json!({"path":"notes/public.txt"})).await??;
+    proxy.inspect(Direction::Server, &packet(&json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"TEST_TOKEN=synthetic-benchmark-secret"}]}}), Direction::Server)?).await?;
     let mut durations = Vec::new();
     for id in 10..2210 {
         let request = packet(
@@ -265,7 +267,7 @@ async fn audit_a01_known_numeric_secret_is_not_returned() -> Result<()> {
     )?;
     assert!(matches!(
         proxy.inspect(Direction::Server, &response).await,
-        Err(Error::Denied)
+        Err(Error::Refused(Reason::DlpDenied))
     ));
     proxy.finish().await?;
     Ok(())
@@ -292,9 +294,245 @@ async fn audit_a02_embedded_binary_is_not_returned() -> Result<()> {
         )?;
         assert!(matches!(
             proxy.inspect(Direction::Server, &response).await,
-            Err(Error::Denied)
+            Err(Error::Refused(Reason::DlpDenied))
         ));
         proxy.finish().await?;
     }
+    Ok(())
+}
+
+/// Read only fixed audit metadata; this helper never returns packet payloads.
+fn audit_rows(dir: &Directory) -> Result<Vec<(String, String, String, String)>> {
+    let connection = rusqlite::Connection::open(dir.0.join("operations.sqlite3"))?;
+    let mut query = connection
+        .prepare("SELECT outcome,reason,session_id,upstream_sha256 FROM events_v1 ORDER BY id")?;
+    Ok(query
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+#[tokio::test]
+async fn audit_a03_fragmented_known_secret_never_leaves_production_gate() -> Result<()> {
+    for fragments in [
+        vec!["1234", "56789"],
+        vec!["1", "23456789"],
+        vec!["12345678", "9"],
+        vec!["1234"],
+    ] {
+        let dir = Directory::new()?;
+        let mut proxy = gate(&dir).await?;
+        catalog(&mut proxy, "Read notes").await?;
+        call(&mut proxy, "read_file", json!({"path":"notes/public.txt"})).await??;
+        proxy.inspect(Direction::Server, &packet(&json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"TEST_TOKEN=123456789"}]}}), Direction::Server)?).await?;
+        let request = packet(
+            &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"notes/public.txt"}}}),
+            Direction::Client,
+        )?;
+        proxy.inspect(Direction::Client, &request).await?;
+        let blocks: Vec<Value> = fragments
+            .iter()
+            .map(|text| json!({"type":"text","text":text}))
+            .collect();
+        let response = packet(
+            &json!({"jsonrpc":"2.0","id":3,"result":{"content":blocks}}),
+            Direction::Server,
+        )?;
+        assert!(matches!(
+            proxy.inspect(Direction::Server, &response).await,
+            Err(Error::Refused(Reason::DlpDenied))
+        ));
+        proxy.finish().await?;
+        assert!(audit_rows(&dir)?.iter().any(|row| row.1 == "dlp_denied"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_a06_secret_catalog_refuses_before_first_pin_and_clean_reconnect_succeeds()
+-> Result<()> {
+    let dir = Directory::new()?;
+    for _ in 0..2 {
+        let mut proxy = gate(&dir).await?;
+        assert!(
+            catalog(&mut proxy, "TEST_TOKEN=synthetic-catalog-value")
+                .await
+                .is_err()
+        );
+        proxy.finish().await?;
+        let connection = rusqlite::Connection::open(dir.0.join("tool-baselines.sqlite3"))?;
+        assert_eq!(
+            connection.query_row("SELECT count(*) FROM tool_baselines_v1", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+    }
+    for _ in 0..2 {
+        let mut proxy = gate(&dir).await?;
+        catalog(&mut proxy, "Reviewed clean catalog").await?;
+        proxy.finish().await?;
+    }
+    for name in ["operations.sqlite3", "tool-baselines.sqlite3"] {
+        assert!(
+            !std::fs::read(dir.0.join(name))?
+                .windows(b"synthetic-catalog-value".len())
+                .any(|window| window == b"synthetic-catalog-value")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_a04_terminal_errors_before_gate_are_durable_and_payload_free() -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for (input, reason, limit, timeout) in [
+        (
+            b"{malformed-synthetic-private-payload}\n".as_slice(),
+            Reason::InvalidMessage,
+            4096,
+            100,
+        ),
+        (
+            b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n".as_slice(),
+            Reason::Protocol,
+            4096,
+            100,
+        ),
+        (b"123456789\n".as_slice(), Reason::Limit, 8, 100),
+        (b"".as_slice(), Reason::Timeout, 4096, 10),
+    ] {
+        let dir = Directory::new()?;
+        let mut proxy = gate(&dir).await?;
+        let (mut client, client_proxy) = tokio::io::duplex(8192);
+        let (mut upstream, server_proxy) = tokio::io::duplex(8192);
+        client.write_all(input).await?;
+        let (cr, cw) = tokio::io::split(client_proxy);
+        let (sr, sw) = tokio::io::split(server_proxy);
+        let result = clawbell_proxy::stdio::relay(
+            cr,
+            cw,
+            sr,
+            sw,
+            &mut proxy,
+            Limits {
+                message_bytes: limit,
+                timeout: std::time::Duration::from_millis(timeout),
+                ..Limits::default()
+            },
+        )
+        .await;
+        assert_eq!(result.err().ok_or("missing_error")?.reason(), reason);
+        let mut forwarded = Vec::new();
+        upstream.read_to_end(&mut forwarded).await?;
+        assert_eq!(forwarded.len(), 0);
+        let rows = audit_rows(&dir)?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, reason.code());
+        assert_eq!(rows[0].2.len(), 32);
+        assert!(
+            !std::fs::read(dir.0.join("operations.sqlite3"))?
+                .windows(b"synthetic-private-payload".len())
+                .any(|window| window == b"synthetic-private-payload")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_a05_policy_schema_dlp_catalog_and_method_reasons_survive() -> Result<()> {
+    let dir = Directory::new()?;
+    for (name, args, reason) in [
+        (
+            "write_file",
+            json!({"path":"SOUL.md","text":"synthetic"}),
+            Reason::MemoryWriteDenied,
+        ),
+        (
+            "read_file",
+            json!({"path":"outside/public"}),
+            Reason::DefaultDeny,
+        ),
+        ("read_file", json!({"path":42}), Reason::SchemaDenied),
+        (
+            "read_file",
+            json!({"path":"TEST_TOKEN=synthetic-raw-secret"}),
+            Reason::DlpDenied,
+        ),
+    ] {
+        let mut proxy = gate(&dir).await?;
+        catalog(&mut proxy, "Read notes").await?;
+        let error = call(&mut proxy, name, args)
+            .await?
+            .err()
+            .ok_or("missing_denial")?;
+        assert_eq!(error.reason(), reason);
+        proxy.finish().await?;
+        assert!(
+            audit_rows(&dir)?
+                .iter()
+                .any(|row| row.0 == "deny" && row.1 == reason.code())
+        );
+    }
+    let mut proxy = gate(&dir).await?;
+    let method = packet(
+        &json!({"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"fixture://text"}}),
+        Direction::Client,
+    )?;
+    assert_eq!(
+        proxy
+            .inspect(Direction::Client, &method)
+            .await
+            .err()
+            .ok_or("missing_denial")?
+            .reason(),
+        Reason::MethodDenied
+    );
+    proxy.finish().await?;
+    let mut proxy = gate(&dir).await?;
+    assert!(catalog(&mut proxy, "Changed clean catalog").await.is_err());
+    proxy.finish().await?;
+    let rows = audit_rows(&dir)?;
+    assert!(rows.iter().any(|row| row.1 == "method_denied"));
+    assert!(rows.iter().any(|row| row.1 == "catalog_denied"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_audit_failure_still_closes_gate_and_pending_operations() -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let dir = Directory::new()?;
+    let store = OperationStore::open(&dir.0, "a".repeat(64)).await?;
+    let mut proxy = compose(
+        policy()?,
+        BaselineStore::open(&dir.0).await?,
+        store,
+        "synthetic".into(),
+    )?;
+    let connection = rusqlite::Connection::open(dir.0.join("operations.sqlite3"))?;
+    connection.execute_batch("CREATE TRIGGER synthetic_full BEFORE INSERT ON events_v1 BEGIN SELECT RAISE(ABORT,'synthetic'); END;")?;
+    let (mut peer, client) = tokio::io::duplex(64);
+    let (_peer, server) = tokio::io::duplex(64);
+    peer.write_all(b"{malformed}\n").await?;
+    let (cr, cw) = tokio::io::split(client);
+    let (sr, sw) = tokio::io::split(server);
+    let result = clawbell_proxy::stdio::relay(cr, cw, sr, sw, &mut proxy, Limits::default()).await;
+    assert!(matches!(
+        result,
+        Err(Error::Refused(Reason::AuditUnavailable))
+    ));
+    connection.execute_batch("DROP TRIGGER synthetic_full;")?;
+    assert!(
+        proxy
+            .inspect(
+                Direction::Client,
+                &packet(
+                    &json!({"jsonrpc":"2.0","id":1,"method":"ping"}),
+                    Direction::Client
+                )?
+            )
+            .await
+            .is_err()
+    );
     Ok(())
 }

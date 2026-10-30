@@ -33,7 +33,10 @@ where
     SW: AsyncWrite + Unpin + Send + 'static,
     G: Gate,
 {
-    let limits = limits.validate()?;
+    let limits = match limits.validate() {
+        Ok(limits) => limits,
+        Err(error) => return complete(gate, Err(error), Limits::default()).await,
+    };
     let (events, incoming) = mpsc::channel(limits.queue);
     let (client_tx, client_rx) = mpsc::channel(limits.queue);
     let (server_tx, server_rx) = mpsc::channel(limits.queue);
@@ -168,9 +171,29 @@ pub(crate) async fn drive<G: Gate>(
     session.close();
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    tokio::time::timeout(limits.timeout, gate.finish())
+    complete(gate, result, limits).await
+}
+
+/// Finish even when terminal audit fails, so vaults and pending operations close.
+async fn complete<G: Gate>(
+    gate: &mut G,
+    result: Result<(), Error>,
+    limits: Limits,
+) -> Result<(), Error> {
+    let terminal = if let Err(error) = &result {
+        tokio::time::timeout(limits.timeout, gate.terminated(error.reason()))
+            .await
+            .map_err(|_| Error::Timeout)
+            .and_then(std::convert::identity)
+    } else {
+        Ok(())
+    };
+    let finish = tokio::time::timeout(limits.timeout, gate.finish())
         .await
-        .map_err(|_| Error::Timeout)??;
+        .map_err(|_| Error::Timeout)
+        .and_then(std::convert::identity);
+    terminal?;
+    finish?;
     result
 }
 
@@ -193,18 +216,26 @@ where
     G: Gate,
     S: clawbell_sandbox::Runner,
 {
-    let limits = limits.validate()?;
+    let limits = match limits.validate() {
+        Ok(limits) => limits,
+        Err(error) => return complete(gate, Err(error), Limits::default()).await,
+    };
     let launch = tokio::time::timeout(limits.timeout, runner.spawn()).await;
     let mut child = match launch {
         Ok(Ok(child)) => child,
         failure => {
             // A timed-out spawn may already have created part of a containment group.
             let _ = tokio::time::timeout(limits.timeout, runner.terminate()).await;
-            return Err(if failure.is_err() {
-                Error::Timeout
-            } else {
-                Error::Denied
-            });
+            return complete(
+                gate,
+                Err(if failure.is_err() {
+                    Error::Timeout
+                } else {
+                    Error::Refused(crate::Reason::IsolationUnavailable)
+                }),
+                limits,
+            )
+            .await;
         }
     };
     let stderr = child.stderr.take();
@@ -227,22 +258,23 @@ where
             tokio::select! {
                 r = relay(read, write, stdout, stdin, gate, limits) => r,
                 r = drain => {
-                    match tokio::time::timeout(limits.timeout, gate.finish()).await {
-                        Ok(Ok(())) => r, Ok(Err(e)) => Err(e), Err(_) => Err(Error::Timeout),
-                    }
+                    complete(gate, r, limits).await
                 }
             }
         }
-        _ => Err(Error::Transport),
+        _ => complete(gate, Err(Error::Transport), limits).await,
     };
     let cleanup = tokio::time::timeout(limits.timeout, runner.terminate()).await;
     let _ = child.start_kill();
-    tokio::time::timeout(limits.timeout, child.wait())
+    let reaped = tokio::time::timeout(limits.timeout, child.wait())
         .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::Transport)?;
-    cleanup
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::Transport)?;
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result.map_err(|_| Error::Transport));
+    let cleanup = cleanup
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result.map_err(|_| Error::Transport));
+    if let Err(error) = reaped.and(cleanup) {
+        return complete(gate, Err(error), limits).await;
+    }
     result
 }

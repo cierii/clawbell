@@ -128,19 +128,27 @@ async fn dispatch(action: Action) -> files::Result<i32> {
                 cgroup_parent: std::fs::canonicalize(cgroup_parent)?,
                 state_dir: std::fs::canonicalize(state_dir)?,
             };
-            // Policy must be valid before changing a client; kernel preflight still
-            // runs at every proxy launch and never falls back to direct execution.
+            // Validate and exercise isolation before changing any client file.
+            // Launch repeats all checks; preflight is never execution permission.
             clawbell_core::policy::Policy::parse(std::str::from_utf8(&files::read(
                 &settings.policy,
                 1024 * 1024,
             )?)?)?;
             files::trusted(&settings.state_dir)?;
+            files::trusted(&settings.workspace)?;
+            files::trusted(settings.policy.parent().ok_or("policy_parent_required")?)?;
             if std::fs::metadata(&settings.state_dir)?.permissions().mode() & 0o777 != 0o700
                 || settings.state_dir.starts_with(&settings.workspace)
+                || ["/usr", "/etc", "/var"]
+                    .iter()
+                    .any(|path| settings.state_dir.starts_with(path))
             {
                 return Err("private_external_state_required".into());
             }
             let paths = configurations(config)?;
+            for (index, path) in paths.iter().enumerate() {
+                bind::preflight(path, &settings, index).await?;
+            }
             for (index, path) in paths.iter().enumerate() {
                 let changed = bind::init(path, &settings)?;
                 println!(

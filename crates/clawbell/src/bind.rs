@@ -135,6 +135,68 @@ fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8
     }
     Ok(bytes)
 }
+/// Check every server's binding and isolation before any configuration mutation.
+/// The only launched program is the runner's fixed trusted probe, never an
+/// upstream or its arguments. Report indices and fixed statuses, never names.
+pub async fn preflight(path: &Path, settings: &Settings, index: usize) -> Result<()> {
+    files::trusted(path.parent().ok_or("parent_required")?)?;
+    let live = files::read(path, MAX)?;
+    let receipt = sidecar(path, ".clawbell.json");
+    let original = if receipt.exists() {
+        let record: Value = serde_json::from_slice(&files::read(&receipt, MAX)?)?;
+        let backup = files::read(&sidecar(path, ".bak"), MAX)?;
+        if record["bound_sha256"] != digest(&live) || record["original_sha256"] != digest(&backup) {
+            return Err("binding_changed_or_incomplete".into());
+        }
+        if transform(&backup, settings, &digest(text(path)?.as_bytes()))? != live {
+            return Err("binding_settings_changed".into());
+        }
+        backup
+    } else {
+        live
+    };
+    // Reuse strict transformation validation without writing its output.
+    transform(&original, settings, &digest(text(path)?.as_bytes()))?;
+    let config: Value = clawbell_core::json::parse(&original)?;
+    let servers = config
+        .get("mcpServers")
+        .or_else(|| config.get("servers"))
+        .and_then(Value::as_object)
+        .ok_or("invalid_server_map")?;
+    for (server_index, server) in servers.values().enumerate() {
+        let result = clawbell_sandbox::native::NativeRunner::preflight(
+            clawbell_sandbox::native::NativeConfig {
+                workspace: settings.workspace.clone(),
+                executable: server["command"]
+                    .as_str()
+                    .ok_or("stdio_command_required")?
+                    .into(),
+                arguments: server.get("args").and_then(Value::as_array).map_or_else(
+                    Vec::new,
+                    |args| {
+                        args.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    },
+                ),
+                cgroup_parent: settings.cgroup_parent.clone(),
+                limits: clawbell_sandbox::native::ResourceLimits::default(),
+            },
+        )
+        .await;
+        println!(
+            "configuration_{index}_server_{server_index}: {}",
+            if result.is_ok() {
+                "preflight_passed"
+            } else {
+                "preflight_denied"
+            }
+        );
+        result?;
+    }
+    Ok(())
+}
 /// Commit one file, with original backup and hash receipt. A failed/interrupted
 /// install keeps its backup; it never guesses recovery or overwrites that backup.
 pub fn init(path: &Path, settings: &Settings) -> Result<bool> {

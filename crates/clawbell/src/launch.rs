@@ -3,7 +3,7 @@
 use crate::files::{self, Result};
 use clawbell_audit::{
     baseline::BaselineStore,
-    operations::{OperationStore, Outcome},
+    operations::{OperationStore, Outcome, Reason},
 };
 use clawbell_core::policy::Policy;
 use clawbell_proxy::{
@@ -66,8 +66,7 @@ impl Gate for AuditGate {
         message: &Envelope,
     ) -> std::result::Result<Envelope, Error> {
         if !permitted(direction, message.method()) {
-            let _ = self.store.record(0, Outcome::Denied).await;
-            return Err(Error::Denied);
+            return Err(Error::Refused(Reason::MethodDenied));
         }
         if let Some(id) = message.id() {
             // Response uses the opposite direction's ID namespace.
@@ -91,7 +90,7 @@ impl Gate for AuditGate {
                     .store
                     .record(0, Outcome::Intent)
                     .await
-                    .map_err(|_| Error::Denied)?;
+                    .map_err(|_| Error::Refused(Reason::AuditUnavailable))?;
                 self.pending.insert(key, correlation);
             } else {
                 let correlation = *self.pending.get(&key).ok_or(Error::Denied)?;
@@ -105,14 +104,14 @@ impl Gate for AuditGate {
                         },
                     )
                     .await
-                    .map_err(|_| Error::Denied)?;
+                    .map_err(|_| Error::Refused(Reason::AuditUnavailable))?;
                 self.pending.remove(&key);
             }
         } else {
             self.store
                 .record(0, Outcome::Intent)
                 .await
-                .map_err(|_| Error::Denied)?;
+                .map_err(|_| Error::Refused(Reason::AuditUnavailable))?;
         }
         Ok(message.clone())
     }
@@ -121,7 +120,7 @@ impl Gate for AuditGate {
             self.store
                 .record(correlation, Outcome::Unknown)
                 .await
-                .map_err(|_| Error::Denied)?;
+                .map_err(|_| Error::Refused(Reason::AuditUnavailable))?;
         }
         Ok(())
     }
@@ -147,7 +146,6 @@ pub async fn run(options: Options) -> Result<()> {
     let policy_bytes = files::read(&options.policy, 1024 * 1024)?;
     let policy = Arc::new(Policy::parse(std::str::from_utf8(&policy_bytes)?)?);
     let digest = format!("{:x}", Sha256::digest(&policy_bytes));
-    let store = OperationStore::open(&state, digest).await?;
     let identity = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(
@@ -156,6 +154,7 @@ pub async fn run(options: Options) -> Result<()> {
             &options.command
         ))?)
     );
+    let store = OperationStore::open_session(&state, digest, identity.clone()).await?;
     let baseline = BaselineStore::open(&state).await?;
     let launch = store.record(0, Outcome::Intent).await?;
     let config = NativeConfig {
@@ -168,7 +167,9 @@ pub async fn run(options: Options) -> Result<()> {
     let mut runner = match NativeRunner::new(config) {
         Ok(r) => r,
         Err(e) => {
-            store.record(launch, Outcome::Denied).await?;
+            store
+                .record_reason(launch, Outcome::Denied, Reason::IsolationUnavailable)
+                .await?;
             return Err(e.into());
         }
     };
@@ -205,13 +206,28 @@ impl<G: Gate> Gate for SessionGate<G> {
         message: &Envelope,
     ) -> std::result::Result<Envelope, Error> {
         let result = self.inner.inspect(direction, message).await;
-        if result.is_err() {
+        if let Err(error) = &result {
             self.store
-                .record(0, Outcome::Denied)
+                .record_reason(0, Outcome::Denied, error.reason())
                 .await
-                .map_err(|_| Error::Denied)?;
+                .map_err(|_| Error::Refused(Reason::AuditUnavailable))?;
         }
         result
+    }
+    async fn terminated(&mut self, reason: Reason) -> std::result::Result<(), Error> {
+        let outcome = if matches!(
+            reason,
+            Reason::Timeout | Reason::Transport | Reason::Cancelled | Reason::Closed
+        ) {
+            Outcome::Unknown
+        } else {
+            Outcome::Denied
+        };
+        self.store
+            .record_reason(0, outcome, reason)
+            .await
+            .map_err(|_| Error::Refused(Reason::AuditUnavailable))?;
+        Ok(())
     }
     async fn finish(&mut self) -> std::result::Result<(), Error> {
         self.inner.finish().await

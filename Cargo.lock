@@ -308,6 +308,7 @@ dependencies = [
  "clawbell-proxy",
  "clawbell-sandbox",
  "libc",
+ "rusqlite",
  "serde_json",
  "sha2",
  "tokio",

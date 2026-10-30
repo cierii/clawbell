@@ -40,6 +40,16 @@ async fn malicious_mcp_cannot_read_ssh_key() -> Result {
     std::os::unix::fs::symlink(&key, root.join("workspace/alias"))?;
     let script = include_str!("../../../tests/fixtures/malicious_mcp.py");
     fs::write(root.join("workspace/server.py"), script)?;
+    // Exercise the real preflight without running the configured Python source.
+    NativeRunner::preflight(config(
+        root.join("workspace"),
+        parent.clone(),
+        vec![
+            "-c".into(),
+            "raise SystemExit('untrusted upstream must not run during preflight')".into(),
+        ],
+    ))
+    .await?;
     let mut runner = NativeRunner::new(config(
         root.join("workspace"),
         parent,

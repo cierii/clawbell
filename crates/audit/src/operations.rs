@@ -37,9 +37,94 @@ impl Outcome {
         }
     }
 }
+/// Payload-free reason shared by policy, inspection and transport boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// Stable `unspecified` reason.
+    Unspecified,
+    /// Stable `invalid_message` reason.
+    InvalidMessage,
+    /// Stable `invalid_protocol_state` reason.
+    Protocol,
+    /// Stable `limit_exceeded` reason.
+    Limit,
+    /// Stable `operation_timeout` reason.
+    Timeout,
+    /// Stable `transport_failed` reason.
+    Transport,
+    /// Stable `operation_cancelled` reason.
+    Cancelled,
+    /// Stable `transport_closed` reason.
+    Closed,
+    /// Stable `inspection_denied` reason.
+    InspectionDenied,
+    /// Stable `dlp_denied` reason.
+    DlpDenied,
+    /// Stable `schema_denied` reason.
+    SchemaDenied,
+    /// Stable `catalog_denied` reason.
+    CatalogDenied,
+    /// Stable `method_denied` reason.
+    MethodDenied,
+    /// Stable `audit_unavailable` reason.
+    AuditUnavailable,
+    /// Stable `isolation_unavailable` reason.
+    IsolationUnavailable,
+    /// Stable `unknown_tool` reason.
+    UnknownTool,
+    /// Stable `opaque_effect` reason.
+    OpaqueEffect,
+    /// Stable `invalid_arguments` reason.
+    InvalidArguments,
+    /// Stable `argument_limit` reason.
+    ArgumentLimit,
+    /// Stable `invalid_path` reason.
+    InvalidPath,
+    /// Stable `memory_write_denied` reason.
+    MemoryWriteDenied,
+    /// Stable `default_deny` reason.
+    DefaultDeny,
+    /// Stable `rule_deny` reason.
+    RuleDeny,
+    /// Stable `owner_approval_required` reason.
+    ApprovalRequired,
+}
+impl Reason {
+    /// Stable storage code containing no peer-supplied data.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::InvalidMessage => "invalid_message",
+            Self::Protocol => "invalid_protocol_state",
+            Self::Limit => "limit_exceeded",
+            Self::Timeout => "operation_timeout",
+            Self::Transport => "transport_failed",
+            Self::Cancelled => "operation_cancelled",
+            Self::Closed => "transport_closed",
+            Self::InspectionDenied => "inspection_denied",
+            Self::DlpDenied => "dlp_denied",
+            Self::SchemaDenied => "schema_denied",
+            Self::CatalogDenied => "catalog_denied",
+            Self::MethodDenied => "method_denied",
+            Self::AuditUnavailable => "audit_unavailable",
+            Self::IsolationUnavailable => "isolation_unavailable",
+            Self::UnknownTool => "unknown_tool",
+            Self::OpaqueEffect => "opaque_effect",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::ArgumentLimit => "argument_limit",
+            Self::InvalidPath => "invalid_path",
+            Self::MemoryWriteDenied => "memory_write_denied",
+            Self::DefaultDeny => "default_deny",
+            Self::RuleDeny => "rule_deny",
+            Self::ApprovalRequired => "owner_approval_required",
+        }
+    }
+}
 struct Write {
     correlation: i64,
     outcome: Outcome,
+    reason: Reason,
     answer: oneshot::Sender<Result<i64, AuditError>>,
 }
 /// Session-local handle. The database generates globally unique correlation IDs;
@@ -55,7 +140,21 @@ impl OperationStore {
     /// # Errors
     /// Refuses unsafe paths, exhausted storage and initialization failures.
     pub async fn open(directory: &Path, policy_digest: String) -> Result<Self, AuditError> {
-        if policy_digest.len() != 64 || !policy_digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Self::open_session(directory, policy_digest, "0".repeat(64)).await
+    }
+    /// Create a globally distinct session with an owner-derived upstream digest.
+    /// Existing records remain append-only; legacy rows keep explicit legacy IDs.
+    /// # Errors
+    /// Refuses invalid digests, unsafe storage or a failed durable session insert.
+    pub async fn open_session(
+        directory: &Path,
+        policy_digest: String,
+        upstream_digest: String,
+    ) -> Result<Self, AuditError> {
+        if [&policy_digest, &upstream_digest]
+            .iter()
+            .any(|digest| digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
             return Err(AuditError);
         }
         let directory = directory.to_owned();
@@ -68,6 +167,13 @@ impl OperationStore {
                     let _ = ready.send(Err(AuditError));
                     return;
                 };
+                let session = connection.query_row(
+                    "INSERT INTO sessions_v1(policy_sha256,upstream_sha256) VALUES(?1,?2) RETURNING id",
+                    params![policy_digest, upstream_digest], |row| row.get::<_, String>(0));
+                let Ok(session) = session else {
+                    let _ = ready.send(Err(AuditError));
+                    return;
+                };
                 if ready.send(Ok(())).is_err() {
                     return;
                 }
@@ -77,6 +183,9 @@ impl OperationStore {
                         &policy_digest,
                         write.correlation,
                         write.outcome,
+                        write.reason,
+                        &session,
+                        &upstream_digest,
                     );
                     let _ = write.answer.send(result);
                 }
@@ -90,6 +199,18 @@ impl OperationStore {
     /// # Errors
     /// Storage, quota or writer failure prevents execution; no fallback exists.
     pub async fn record(&self, correlation: i64, outcome: Outcome) -> Result<i64, AuditError> {
+        self.record_reason(correlation, outcome, Reason::Unspecified)
+            .await
+    }
+    /// Durably append an event with its fixed reason and this handle's session.
+    /// # Errors
+    /// Storage/queue failure denies execution, including terminal-event failure.
+    pub async fn record_reason(
+        &self,
+        correlation: i64,
+        outcome: Outcome,
+        reason: Reason,
+    ) -> Result<i64, AuditError> {
         if correlation < 0 {
             return Err(AuditError);
         }
@@ -98,6 +219,7 @@ impl OperationStore {
             .try_send(Write {
                 correlation,
                 outcome,
+                reason,
                 answer,
             })
             .map_err(|_| AuditError)?;
@@ -124,7 +246,7 @@ fn open(directory: &Path) -> Result<Connection, AuditError> {
     if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
         return Err(AuditError);
     }
-    let connection = Connection::open(path).map_err(|_| AuditError)?;
+    let mut connection = Connection::open(path).map_err(|_| AuditError)?;
     connection
         .busy_timeout(std::time::Duration::from_millis(100))
         .map_err(|_| AuditError)?;
@@ -136,6 +258,53 @@ fn open(directory: &Path) -> Result<Connection, AuditError> {
         ) STRICT;
         CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;
         CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;") .map_err(|_| AuditError)?;
+    // Serialize additive migration across concurrent sessions. Never rewrite old
+    // records or invent identities/reasons for historical events.
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| AuditError)?;
+    let columns = {
+        let mut query = tx
+            .prepare("PRAGMA table_info(events_v1)")
+            .map_err(|_| AuditError)?;
+        query
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|_| AuditError)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| AuditError)?
+    };
+    for (name, sql) in [
+        (
+            "session_id",
+            "ALTER TABLE events_v1 ADD COLUMN session_id TEXT NOT NULL DEFAULT 'legacy'",
+        ),
+        (
+            "upstream_sha256",
+            "ALTER TABLE events_v1 ADD COLUMN upstream_sha256 TEXT NOT NULL DEFAULT 'legacy'",
+        ),
+        (
+            "reason",
+            "ALTER TABLE events_v1 ADD COLUMN reason TEXT NOT NULL DEFAULT 'legacy_unspecified'",
+        ),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            tx.execute_batch(sql).map_err(|_| AuditError)?;
+        }
+    }
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS sessions_v1 (
+        id TEXT PRIMARY KEY NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+        utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        policy_sha256 TEXT NOT NULL, upstream_sha256 TEXT NOT NULL
+    ) STRICT;
+    CREATE TRIGGER IF NOT EXISTS sessions_no_update BEFORE UPDATE ON sessions_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;
+    CREATE TRIGGER IF NOT EXISTS sessions_no_delete BEFORE DELETE ON sessions_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;
+    CREATE TABLE IF NOT EXISTS operation_migrations_v1 (
+        version INTEGER PRIMARY KEY, utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    ) STRICT;
+    INSERT OR IGNORE INTO operation_migrations_v1(version) VALUES(2);
+    CREATE TRIGGER IF NOT EXISTS migrations_no_update BEFORE UPDATE ON operation_migrations_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;
+    CREATE TRIGGER IF NOT EXISTS migrations_no_delete BEFORE DELETE ON operation_migrations_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;").map_err(|_| AuditError)?;
+    tx.commit().map_err(|_| AuditError)?;
     Ok(connection)
 }
 fn append(
@@ -143,13 +312,22 @@ fn append(
     policy: &str,
     correlation: i64,
     outcome: Outcome,
+    reason: Reason,
+    session: &str,
+    upstream: &str,
 ) -> Result<i64, AuditError> {
-    connection
+    let inserted = connection
         .execute(
-            "INSERT INTO events_v1(correlation,policy_sha256,outcome) VALUES(?1,?2,?3)",
-            params![correlation, policy, outcome.code()],
+            "INSERT INTO events_v1(correlation,policy_sha256,outcome,reason,session_id,upstream_sha256)
+             SELECT ?1,?2,?3,?4,?5,?6 WHERE ?1=0 OR EXISTS (
+                SELECT 1 FROM events_v1 WHERE id=?1 AND session_id=?5 AND outcome='allow_intent'
+             )",
+            params![correlation, policy, outcome.code(), reason.code(), session, upstream],
         )
         .map_err(|_| AuditError)?;
+    if inserted != 1 {
+        return Err(AuditError);
+    }
     Ok(connection.last_insert_rowid())
 }
 
@@ -211,6 +389,78 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn additive_migration_sessions_reasons_and_cross_session_refusal() -> Result {
+        let dir = Directory::new()?;
+        let path = dir.0.join("operations.sqlite3");
+        // Create an actual old-schema database, preserving its immutable row.
+        let legacy = Connection::open(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        legacy.execute_batch("CREATE TABLE events_v1 (
+            id INTEGER PRIMARY KEY, correlation INTEGER NOT NULL,
+            utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            policy_sha256 TEXT NOT NULL, outcome TEXT NOT NULL
+        ) STRICT;
+        INSERT INTO events_v1(correlation,policy_sha256,outcome) VALUES(0,'legacy-policy','allow_intent');")?;
+        drop(legacy);
+        let (one, two) = tokio::join!(
+            OperationStore::open_session(&dir.0, "a".repeat(64), "b".repeat(64)),
+            OperationStore::open_session(&dir.0, "a".repeat(64), "c".repeat(64))
+        );
+        let (one, two) = (one?, two?);
+        let first = one.record(0, Outcome::Intent).await?;
+        let second = two.record(0, Outcome::Intent).await?;
+        one.record_reason(first, Outcome::Denied, Reason::DlpDenied)
+            .await?;
+        two.record_reason(second, Outcome::Denied, Reason::MemoryWriteDenied)
+            .await?;
+        assert!(two.record(first, Outcome::Response).await.is_err());
+        assert!(one.record(999_999, Outcome::Response).await.is_err());
+        let reader = open(&dir.0)?;
+        let mut query = reader
+            .prepare("SELECT session_id,upstream_sha256,reason FROM events_v1 ORDER BY id")?;
+        let rows = query
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            rows[0],
+            (
+                "legacy".into(),
+                "legacy".into(),
+                "legacy_unspecified".into()
+            )
+        );
+        assert_ne!(rows[1].0, rows[2].0);
+        assert_eq!(rows[1].0.len(), 32);
+        assert_eq!(rows[1].0, rows[3].0);
+        assert_eq!(rows[2].0, rows[4].0);
+        assert_eq!(rows[3].1, "b".repeat(64));
+        assert_eq!(rows[3].2, "dlp_denied");
+        assert_eq!(rows[4].2, "memory_write_denied");
+        assert_eq!(
+            reader.query_row(
+                "SELECT count(*) FROM operation_migrations_v1 WHERE version=2",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            1
+        );
+        assert!(
+            reader
+                .execute("UPDATE sessions_v1 SET upstream_sha256='changed'", [])
+                .is_err()
+        );
+        assert!(reader.execute("DELETE FROM sessions_v1", []).is_err());
+        assert!(reader.execute("DELETE FROM events_v1", []).is_err());
         Ok(())
     }
     #[tokio::test]

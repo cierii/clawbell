@@ -1,6 +1,8 @@
 # 0006 — Reversible client binding and conservative audited Linux MVP
 
 Status: implementation of existing constitution boundaries; no permissive bypass.
+Session audit metadata, terminal failures and binding preflight are tightened by
+[ADR 0008](0008-fragments-audit-and-binding-preflight.md).
 
 ## Decision
 

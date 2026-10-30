@@ -143,6 +143,32 @@ impl Vault {
         }
         Ok(result)
     }
+    /// Inspect an ordered text unit before any fragment is released. Full known
+    /// secrets crossing field boundaries refuse rather than rewriting semantics.
+    /// A trailing proper prefix also refuses: it could be completed by a later
+    /// response. This is deliberately conservative, even for one-character tails.
+    /// # Errors
+    /// Refuses split secrets, incomplete known-secret prefixes or unit overflow.
+    pub fn inspect_fragments(&mut self, fragments: &[&str]) -> Result<(), Denied> {
+        let mut text = Zeroizing::new(String::new());
+        let mut boundaries = Vec::new();
+        for fragment in fragments {
+            if fragment.len() > self.max_bytes.saturating_sub(text.len()) {
+                return Err(Denied);
+            }
+            text.push_str(fragment);
+            boundaries.push(text.len());
+        }
+        // Learn patterns spanning blocks before checking exact known values.
+        // The resulting markers are never used as catalog/policy input.
+        self.redact(&text)?;
+        for entry in &self.entries {
+            let plain = self.plaintext(entry)?;
+            let secret = std::str::from_utf8(&plain).map_err(|_| Denied)?;
+            inspect_known_fragments(text.as_bytes(), secret.as_bytes(), &boundaries)?;
+        }
+        Ok(())
+    }
     /// Reject raw secrets mixed with references; validate every reference.
     /// # Errors
     /// Denies unknown references and detectable raw credentials.
@@ -189,6 +215,61 @@ impl Vault {
         Ok(result)
     }
 }
+/// Linear prefix matching also finds overlapping occurrences (e.g. `aaa` in
+/// `aaaa`). A complete final occurrence is safe only inside one redacted field;
+/// otherwise a surviving proper prefix must never reach the next response.
+fn inspect_known_fragments(text: &[u8], secret: &[u8], boundaries: &[usize]) -> Result<(), Denied> {
+    let mut prefixes = vec![0; secret.len()];
+    let mut matched = 0;
+    for index in 1..secret.len() {
+        while matched > 0 && secret[matched] != secret[index] {
+            matched = prefixes[matched - 1];
+        }
+        if secret[matched] == secret[index] {
+            matched += 1;
+        }
+        prefixes[index] = matched;
+    }
+    matched = 0;
+    let mut complete_at_end = false;
+    let mut next_redacted_start = 0;
+    let mut boundary = 0;
+    for (index, byte) in text.iter().enumerate() {
+        while matched > 0 && secret[matched] != *byte {
+            matched = prefixes[matched - 1];
+        }
+        if secret[matched] == *byte {
+            matched += 1;
+        }
+        if matched == secret.len() {
+            let end = index + 1;
+            let start = end - secret.len();
+            while boundaries
+                .get(boundary)
+                .is_some_and(|boundary| *boundary <= start)
+            {
+                boundary += 1;
+            }
+            if boundaries
+                .get(boundary)
+                .is_some_and(|boundary| *boundary < end)
+            {
+                return Err(Denied);
+            }
+            // Match the field redactor's non-overlapping exact replacements.
+            // An overlapping final match may leave a plaintext suffix behind.
+            if start >= next_redacted_start {
+                complete_at_end = end == text.len();
+                next_redacted_start = end;
+            }
+            matched = prefixes[matched - 1];
+        }
+    }
+    if !complete_at_end && matched > 0 {
+        return Err(Denied);
+    }
+    Ok(())
+}
 /// Incremental byte buffer, wiped on drop; releases no uninspected prefix.
 pub struct Scanner {
     buffer: Zeroizing<Vec<u8>>,
@@ -224,5 +305,47 @@ impl Scanner {
             return Err(Denied);
         }
         vault.redact(std::str::from_utf8(&self.buffer).map_err(|_| Denied)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn binary_word(value: usize, length: usize) -> String {
+        (0..length)
+            .map(|bit| if value & (1 << bit) == 0 { 'a' } else { 'b' })
+            .collect()
+    }
+    #[test]
+    fn exhaustive_overlaps_never_release_secret_or_completable_suffix() {
+        for secret_len in 1..=4 {
+            for pattern in 0..(1 << secret_len) {
+                let secret = binary_word(pattern, secret_len);
+                for length in 0..=7 {
+                    for word in 0..(1 << length) {
+                        let text = binary_word(word, length);
+                        for split in 0..=length {
+                            if inspect_known_fragments(
+                                text.as_bytes(),
+                                secret.as_bytes(),
+                                &[split, length],
+                            )
+                            .is_ok()
+                            {
+                                let redacted = format!(
+                                    "{}{}",
+                                    text[..split].replace(&secret, "MARKER"),
+                                    text[split..].replace(&secret, "MARKER")
+                                );
+                                assert!(!redacted.contains(&secret));
+                                for prefix in 1..secret_len {
+                                    assert!(!redacted.ends_with(&secret[..prefix]));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
