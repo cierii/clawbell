@@ -2,3 +2,6 @@
 
 #[cfg(unix)]
 pub mod baseline;
+
+#[cfg(unix)]
+pub mod operations;

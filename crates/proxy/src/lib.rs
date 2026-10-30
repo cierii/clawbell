@@ -23,7 +23,6 @@ pub mod monitor;
 pub mod policy;
 pub mod protocol;
 pub mod stdio;
-mod strict_json;
 
 use std::{future::Future, time::Duration};
 

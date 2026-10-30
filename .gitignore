@@ -40,3 +40,8 @@ id_ed25519
 *.sqlite3-journal
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Installer backups/receipts can contain user configuration and credentials
+*.bak
+*.clawbell.json
+*.clawbell-*.tmp

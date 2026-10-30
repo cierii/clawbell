@@ -39,7 +39,7 @@ impl Envelope {
         if bytes.len() > max {
             return Err(Error::Limit);
         }
-        let value: Value = crate::strict_json::parse(bytes).map_err(|_| Error::InvalidMessage)?;
+        let value: Value = clawbell_core::json::parse(bytes).map_err(|_| Error::InvalidMessage)?;
         let obj = value.as_object().ok_or(Error::InvalidMessage)?;
         if obj.get("jsonrpc") != Some(&Value::String("2.0".into())) {
             return Err(Error::InvalidMessage);

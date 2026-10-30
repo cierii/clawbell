@@ -1,52 +1,78 @@
-# Handoff — 2026-10-30: terminal monitor and human approval
+# Handoff — 2026-10-30: installer, skill inspector and Linux MVP
 
-## Objective and delivered changes
+## Delivered
 
-Added bounded Unix-socket IPC, a terminal monitor client, live redacted packet
-telemetry, owner server/sandbox status events and a RequireApproval rendezvous
-inside PolicyGate. The immutable call is suspended until a one-use owner decision;
-inner audit/DLP and schema/catalog/memory protections remain mandatory.
+CLI now provides `init`, `unbind`, `scan`, `proxy`, `policy check` and the existing
+monitor client. Binding discovers bounded known JSON MCP client locations or
+explicit paths, uses private exclusive .bak files and hash receipts, preserves
+literal arguments and refuses unsafe restoration/tampering. Complete workspace
+path arguments translate to the runner's /workspace mount.
 
-Files: proxy/src/monitor.rs, proxy/src/policy.rs, core policy/signatures helpers,
-clawbell CLI and dependencies/lockfile, integration/unit tests, README, ADR 0005.
-AGENTS.md is unchanged at 199 lines. No React/browser panel was added.
+The static inspector flags hidden Unicode, standard/URL-safe Base64 (including
+bounded nested decoding), network/credential/memory/instruction indicators. It
+never runs files or prints payloads. Package/inspection limits fail closed.
 
-## Verified
+The executable Linux launcher composes NativeRunner, strict protocol, immutable
+policy, pinned schemas/catalog, session DLP and the new dedicated durable operation
+audit writer. Unsupported capabilities/resources/prompts deny. No production
+allow-all adapter, unisolated launch, network/write exception or secret restoration.
 
-- Context7 Tokio Unix socket, peer credentials, bounded channel/timeout contracts.
-- cargo fmt --all -- --check; clippy workspace/all-targets/locked with -D warnings.
-- cargo test --workspace --locked --no-fail-fast passed outside restricted socket
-  sandbox. Ordinary sandbox attempts failed on forbidden Unix/loopback binds;
-  these were not treated as passing checks. Native OS ignored tests were not rerun.
-- cargo build --workspace --release --locked; CLI --help.
-- Release monitor_packet_under_five_ms: 2000 warmed complete telemetry publications,
-  maximum 7.093 microseconds. This measures added telemetry only, not total proxy
-  cost, audit fsync, scheduler worst cases, large packets or human wait.
-- Real IPC integration proves zero inner calls before approval and exactly one
-  afterward; unit tests cover one-use consumption, rejection, absent owner,
-  redaction of a registered synthetic secret, framing bounds/EOF, terminal controls.
-- PTY smoke test showed server status, cyan JSON strings, yellow synthetic marker,
-  pending queue and `d 1` keyboard command. Synthetic peer received allow=false;
-  its deliberate disconnect produced the expected sanitized monitor error.
-- Gitleaks history scan after git fetch found no leaks. Final exact candidate
-  snapshot is scanned before commit; this does not prove absence of every secret.
+Files: CLI binding/files/scan/launch and adversarial tests; core skill inspection
+and shared strict JSON parser; audit operations writer/tests; real CLI fixture and
+attack/performance harness; verification/secret/package scripts; GitHub Actions;
+README, ADR 0006 and release notes. AGENTS.md remains unchanged at 199 lines.
+Only direct dependencies added were already locked transitively: base64, sha2, libc.
 
-## Integration limits and next step
+## Verified on this Linux host
 
-CLI now exposes `monitor --socket PATH`; it does not launch a deployable audited
-proxy. Existing repo has no operation-audit Gate composition. Library users must
-create/supervise Monitor::serve, register known secrets, attach with_monitor, and
-publish runner-verified sandbox status. PolicyGate explicitly reports unattested
-sandbox status. Do not fabricate an allow-all adapter for a demo deployment.
+- Context7: clap subcommands/trailing arguments, rusqlite durability/transactions,
+  bubblewrap descriptor/namespace/build contracts. Official bubblewrap v0.12.0
+  tag resolves to 2a76602a8c71f36c1527cf9fc3417d9149822e0c for native CI.
+- Full `bash scripts/check-release.sh` passed, with pinned Rust 1.99.1: fetch
+  --locked, format, Clippy all targets/-D warnings, workspace tests, release build,
+  CLI help/policy validation, explicit native memory/lifecycle/SSH tests and all
+  release latency gates. Ordinary restricted sandbox socket tests initially failed
+  on denied Unix/loopback binds; full verification outside those environmental
+  restrictions passed. Isolation was never weakened to obtain passing tests.
+- 4,000 production gate packets (parse/encode, schema/policy, DLP, synchronous FULL
+  durable audit): p99 201.432 microseconds, maximum 758.988 microseconds.
+- Full real CLI + native process + transport + policy/schema + DLP + durable audit:
+  2,000 warmed read-tool RTTs, p99 0.941 ms, maximum 2.211 ms. Every sample <5 ms.
+  Five real CLI attacks refused; synthetic host credentials and SOUL.md unchanged.
+- Native transport-only RTT maximum 356.967 microseconds; policy gate 17.934 us;
+  DLP 2,274-byte packet 324.375 us; monitor publication 9.528 us.
+- Backup round trips/idempotence, interrupted install cleanup, tampered backups,
+  owner edits, symlink/hardlink/unsafe directory refusal, unsupported JSON/server
+  options, duplicate keys, Unicode scalar sweep/nested Base64/budgets, public CLI
+  scan statuses, storage refusal and append-only durability covered by tests.
+- Python AST, Bash syntax, local documentation links, workflow YAML syntax and
+  git diff whitespace checked. Packaging/checksum verification is run before commit.
+- Gitleaks fetched Git history: no leaks found. Exact staged candidate is scanned
+  before commit; no claim of exhaustive secret detection or remote-fork erasure.
 
-Owner-private directory and all ancestors must be trusted, inaccessible to child
-sandboxes. Socket survives server termination; explicit owner cleanup is required.
-The UI uses cooked terminal input, Enter for commands and bounded history. Expired
-IDs may remain visible until local removal/reconnect; proxy always refuses them.
-Remote effects remain outside local runner isolation. Full end-to-end latency is
-not certified. macOS NativeRunner remains fail-closed as documented in ADR 0004.
-Future work must supply durable operation-audit composition and runner-attested
-inventory before describing the CLI as a complete firewall deployment.
+## Release and remaining limits
 
-Toolchain: RUSTUP_HOME=/tmp/clawbell-rustup,
-CARGO_HOME=/tmp/clawbell-cargo, /tmp/clawbell-cargo/bin/cargo.
+GitHub Actions builds a checksummed x86-64 Linux archive and publishes only for a
+matching v0.1.0 tag after checks and native jobs pass. Hosted native job provisions
+bubblewrap/user namespaces/cgroups; unavailable facilities fail, not skip. GitHub
+connector returned 404 for this private repository; SSH fetch works. Remote Actions
+status/publication must be checked separately; local tests do not certify CI.
+
+The launcher requires a private external state directory and persistent owner
+cgroup delegation. Installer does not provision persistent host service-manager
+configuration or support JSONC, remote URLs, PATH executables, credential env/cwd.
+Static heuristics and TOFU do not establish safety. The selected mounted workspace
+must be credential-free. HTTP library adapters remain available, but automatic
+HTTP binding, web UI and interactive approval integration are outside this MVP.
+macOS/Windows execution remains unavailable/fail-closed. No frontend manifests
+exist, so npm/browser UI checks were not applicable or reported as passing.
+
+Latency results cover warmed bounded local packets; startup, schema compilation,
+large messages, arbitrary storage contention and scheduler pauses are excluded.
+No universal hard real-time guarantee or durability fallback is claimed. Audit has
+a hard page quota and no automatic retention. Unfinished intents remain unknown
+and never replay; owner-reviewed rotation and legitimate baseline migrations need
+future explicit contracts. Backup/receipt recovery is in ADR 0006.
+
+Toolchain environment used locally: RUSTUP_HOME=/tmp/clawbell-rustup,
+CARGO_HOME=/tmp/clawbell-cargo, PATH=/tmp/clawbell-cargo/bin:/usr/bin:/bin.

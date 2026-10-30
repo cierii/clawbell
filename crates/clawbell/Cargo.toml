@@ -19,6 +19,8 @@ clawbell-sandbox = { path = "../sandbox" }
 clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+libc = "0.2"
 
 [lints]
 workspace = true

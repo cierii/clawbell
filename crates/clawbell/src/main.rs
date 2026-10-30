@@ -1,7 +1,12 @@
-//! Terminal monitor client. Its stdout is a UI, never an MCP stdio transport.
+//! Owner CLI and fail-closed local MCP launcher.
+mod bind;
+mod files;
+mod launch;
+mod scan;
 use clap::{Parser, Subcommand};
 use clawbell_proxy::monitor::{Command, Event, frame};
 use std::fmt::Write as _;
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{BTreeMap, VecDeque},
     io::{self, IsTerminal, Write},
@@ -13,13 +18,41 @@ use tokio::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Local MCP security monitor")]
+#[command(version, about = "Local MCP firewall and static skill inspector")]
 struct Cli {
     #[command(subcommand)]
     command: Action,
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Bind supported JSON MCP clients through the sandboxed firewall.
+    Init {
+        /// Explicit JSON client configurations; otherwise use known locations.
+        #[arg(long)]
+        config: Vec<PathBuf>,
+        #[arg(long)]
+        policy: PathBuf,
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        cgroup_parent: PathBuf,
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
+    /// Restore unchanged managed configurations from their original .bak files.
+    Unbind {
+        #[arg(long)]
+        config: Vec<PathBuf>,
+    },
+    /// Inspect an unpacked UTF-8 skill file/package offline (0 clean, 2 findings).
+    Scan { path: PathBuf },
+    /// Run one local stdio MCP server with mandatory policy, audit and containment.
+    Proxy(launch::Options),
+    /// Validate owner policy without executing any tools.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyAction,
+    },
     /// Monitor a running owner-private IPC endpoint. Commands require Enter.
     Monitor {
         /// Socket in a trusted owner-private directory, outside sandbox mounts.
@@ -28,13 +61,109 @@ enum Action {
     },
 }
 
+#[derive(Subcommand)]
+enum PolicyAction {
+    /// Parse and compile the complete strict policy.
+    Check {
+        #[arg(long)]
+        file: PathBuf,
+    },
+}
+
 #[tokio::main]
 async fn main() {
-    let Action::Monitor { socket } = Cli::parse().command;
-    if run(socket).await.is_err() {
-        eprintln!("monitor_failed: verify private socket and running proxy");
-        std::process::exit(1);
+    if let Ok(code) = dispatch(Cli::parse().command).await {
+        std::process::exit(code);
     }
+    eprintln!(
+        "operation_failed: configuration, inspection or mandatory security prerequisite refused; no raw diagnostics are printed"
+    );
+    std::process::exit(1);
+}
+fn configurations(config: Vec<PathBuf>) -> files::Result<Vec<PathBuf>> {
+    let mut paths = if config.is_empty() {
+        let home = std::env::var_os("HOME").ok_or("home_required")?;
+        bind::discover(&PathBuf::from(home), &std::env::current_dir()?)
+    } else {
+        config
+    };
+    if paths.len() > 32 {
+        return Err("configuration_count_limit".into());
+    }
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return Err("no_supported_configurations".into());
+    }
+    for path in &mut paths {
+        *path = std::path::absolute(&*path)?;
+    }
+    Ok(paths)
+}
+async fn dispatch(action: Action) -> files::Result<i32> {
+    match action {
+        Action::Monitor { socket } => run(socket).await?,
+        Action::Scan { path } => return Ok(if scan::run(&path)? { 2 } else { 0 }),
+        Action::Policy {
+            command: PolicyAction::Check { file },
+        } => {
+            clawbell_core::policy::Policy::parse(std::str::from_utf8(&files::read(
+                &file,
+                1024 * 1024,
+            )?)?)?;
+            println!("policy_valid");
+        }
+        Action::Proxy(options) => launch::run(options).await?,
+        Action::Init {
+            config,
+            policy,
+            workspace,
+            cgroup_parent,
+            state_dir,
+        } => {
+            let settings = bind::Settings {
+                binary: std::env::current_exe()?,
+                policy: std::fs::canonicalize(policy)?,
+                workspace: std::fs::canonicalize(workspace)?,
+                cgroup_parent: std::fs::canonicalize(cgroup_parent)?,
+                state_dir: std::fs::canonicalize(state_dir)?,
+            };
+            // Policy must be valid before changing a client; kernel preflight still
+            // runs at every proxy launch and never falls back to direct execution.
+            clawbell_core::policy::Policy::parse(std::str::from_utf8(&files::read(
+                &settings.policy,
+                1024 * 1024,
+            )?)?)?;
+            files::trusted(&settings.state_dir)?;
+            if std::fs::metadata(&settings.state_dir)?.permissions().mode() & 0o777 != 0o700
+                || settings.state_dir.starts_with(&settings.workspace)
+            {
+                return Err("private_external_state_required".into());
+            }
+            let paths = configurations(config)?;
+            for (index, path) in paths.iter().enumerate() {
+                let changed = bind::init(path, &settings)?;
+                println!(
+                    "configuration_{index}: {}",
+                    if changed { "bound" } else { "already_bound" }
+                );
+            }
+        }
+        Action::Unbind { config } => {
+            for (index, path) in configurations(config)?.iter().enumerate() {
+                let changed = bind::unbind(path)?;
+                println!(
+                    "configuration_{index}: {}",
+                    if changed {
+                        "restored_backup_retained"
+                    } else {
+                        "not_managed"
+                    }
+                );
+            }
+        }
+    }
+    Ok(0)
 }
 
 async fn run(socket: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -147,3 +276,6 @@ mod tests {
         assert!(display.contains("\\u0007"));
     }
 }
+
+#[cfg(test)]
+mod bind_tests;

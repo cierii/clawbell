@@ -1,0 +1,96 @@
+name: MVP checks and Linux release
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: |
+          toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt,clippy
+      - name: Install and verify pinned secret scanner
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 -o /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz' | sha256sum --check
+          mkdir /tmp/gitleaks
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp/gitleaks gitleaks
+          GITLEAKS_BIN=/tmp/gitleaks/gitleaks bash scripts/check-secrets.sh
+      - name: Format, lint, test, build and CLI smoke checks
+        run: bash scripts/check-local.sh
+      - name: Production gate packet budget (includes durable audit)
+        run: cargo test --locked --release -p clawbell complete_mvp_gate_packets_under_five_ms -- --ignored --nocapture
+      - name: Package Linux MVP
+        run: bash scripts/package-release.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-mvp
+          path: |
+            target/package/*.tar.gz
+            target/package/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain and namespace-capable bubblewrap
+        run: |
+          toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt,clippy
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y meson ninja-build libcap-dev pkg-config
+          git clone --filter=blob:none https://github.com/containers/bubblewrap.git /tmp/bubblewrap
+          git -C /tmp/bubblewrap checkout --detach 2a76602a8c71f36c1527cf9fc3417d9149822e0c
+          meson setup /tmp/bubblewrap/build /tmp/bubblewrap --buildtype=release
+          meson compile -C /tmp/bubblewrap/build
+          sudo install -m 0755 /tmp/bubblewrap/build/bwrap /usr/bin/bwrap
+          # Ephemeral CI host prerequisite: allow unprivileged user namespaces.
+          # Runner namespaces, seccomp and cgroups remain mandatory in every test.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Native containment, attacks and latency release gates
+        run: bash scripts/check-release.sh
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [checks, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-mvp
+          path: release
+      - name: Validate version, checksums and publish immutable tag artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          test "$RELEASE_TAG" = "v$version"
+          (cd release && sha256sum --check ./*.sha256)
+          gh release create "$RELEASE_TAG" release/* --verify-tag --title "clawbell $version MVP" --notes-file docs/release-notes.md

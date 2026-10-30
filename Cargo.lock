@@ -307,7 +307,9 @@ dependencies = [
  "clawbell-core",
  "clawbell-proxy",
  "clawbell-sandbox",
+ "libc",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -325,6 +327,7 @@ dependencies = [
 name = "clawbell-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chacha20poly1305",
  "getrandom 0.2.17",
  "regex",

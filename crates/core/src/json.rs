@@ -56,6 +56,9 @@ impl<'de> Deserialize<'de> for Strict {
         deserializer.deserialize_any(Json)
     }
 }
-pub(crate) fn parse(bytes: &[u8]) -> Result<Value, serde_json::Error> {
+/// Parse a complete JSON unit without accepting duplicate object properties.
+/// # Errors
+/// Returns a syntax/depth error or refuses duplicate keys at any nesting level.
+pub fn parse(bytes: &[u8]) -> Result<Value, serde_json::Error> {
     serde_json::from_slice::<Strict>(bytes).map(|v| v.0)
 }

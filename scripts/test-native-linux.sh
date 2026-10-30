@@ -9,3 +9,5 @@ printf '+cpu +memory +pids\n' > "$parent/cgroup.subtree_control"
 export CLAWBELL_TEST_CGROUP="$parent"
 cargo test -p clawbell-sandbox --locked --test native -- --ignored --nocapture
 cargo test -p clawbell-proxy --release --locked --test native_runner -- --ignored --nocapture
+cargo build --release --locked -p clawbell
+python3 scripts/test-mvp-cli.py
