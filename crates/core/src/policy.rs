@@ -114,6 +114,17 @@ pub fn protected_path(path: &str) -> bool {
     })
 }
 impl Policy {
+    /// Owner-configured effect and affected paths for the approval display.
+    /// This describes declared effects; it cannot attest to remote server code.
+    #[must_use]
+    pub fn approval_scope(&self, name: &str, arguments: &Value) -> Value {
+        self.tools.iter().find(|tool| tool.name == name).map_or(Value::Null, |tool| {
+            serde_json::json!({
+                "effect": match tool.effect { Effect::Read => "read", Effect::Write => "write", Effect::Opaque => "opaque" },
+                "paths": tool.paths.iter().filter_map(|pointer| arguments.pointer(pointer)).collect::<Vec<_>>()
+            })
+        })
+    }
     /// Parse strict TOML and compile bounded regexes before installing a snapshot.
     /// # Errors
     /// Rejects unknown fields/effects, duplicate tools, invalid selectors or limits.

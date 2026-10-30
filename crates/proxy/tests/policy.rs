@@ -399,3 +399,70 @@ async fn catalog_refresh_has_no_stale_execution_window() -> Result {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn ipc_owner_approval_forwards_exactly_one_call() -> Result {
+    use clawbell_proxy::monitor::{Command, Event, Monitor, frame};
+    use tokio::{
+        io::{AsyncWriteExt, BufReader},
+        net::UnixStream,
+    };
+    let directory = Directory::new()?;
+    let monitor = Monitor::new()?;
+    let socket = directory.0.join("monitor.sock");
+    let server_monitor = monitor.clone();
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move { server_monitor.serve(&server_socket).await });
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let stream = UnixStream::connect(socket).await?;
+    let (read, mut write) = stream.into_split();
+    let mut reader = BufReader::new(read);
+    let mut buffer = Vec::new();
+    let policy = Arc::new(Policy::parse(
+        r#"
+version = "approval-test"
+[[tools]]
+name = "append"
+effect = "write"
+paths = ["/path"]
+[[rules]]
+tool = "append"
+decision = "require_approval"
+"#,
+    )?);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut gate = PolicyGate::new(
+        FixtureGate {
+            calls: calls.clone(),
+        },
+        policy,
+        BaselineStore::open(&directory.0).await?,
+        "owner-server".into(),
+    )?
+    .with_monitor(monitor);
+    catalog(&mut gate, vec![tool("synthetic")]).await?;
+    let pending =
+        tokio::spawn(async move { gate.inspect(Direction::Client, &call("notes.txt")?).await });
+    let event = loop {
+        let event: Event = serde_json::from_slice(&frame(&mut reader, &mut buffer).await?)?;
+        if event.id != 0 {
+            break event;
+        }
+    };
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let mut command = serde_json::to_vec(&Command {
+        id: event.id,
+        allow: true,
+    })?;
+    command.push(b'\n');
+    write.write_all(&command).await?;
+    assert!(pending.await?.is_ok());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    server.abort();
+    Ok(())
+}

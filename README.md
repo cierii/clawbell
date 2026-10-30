@@ -26,9 +26,25 @@ Unknown effects, tools, fields and invalid regexes fail closed. An immutable
 snapshot is held through each session. To reload, parse a replacement first and
 install it only after success; existing sessions retain their original snapshot.
 
-`require_approval` requests owner interaction and remains blocked by `PolicyGate`.
-There is no approval issuance/redemption API or interactive approval UI yet;
-no approval can bypass memory protection, schema validation or a deny rule.
+`require_approval` can suspend a call through an owner-private Unix socket.
+Attach `PolicyGate::with_monitor(Monitor)` and run `Monitor::serve` in a supervised
+task. The inner audit/DLP adapter remains mandatory. Register known secrets in the
+Monitor before publishing; publish runner-verified sandbox status explicitly.
+Start the terminal client with:
+
+```bash
+cargo run --locked -p clawbell -- monitor --socket /trusted/private/monitor.sock
+```
+
+The socket parent must already exist with mode 0700, outside sandbox mounts.
+Commands `a ID`, `d ID`, and `q` require Enter. Strings are cyan and masked values
+are highlighted yellow. The display includes bounded live packets, server status
+and pending security decisions. Without a connected owner, approval denies.
+Decisions expire after 25 seconds and can authorize only one exact suspended call.
+See [ADR 0005](docs/adr/0005-owner-ipc-approvals.md) for integration and limits.
+The CLI provides the monitor client; a deployable audited proxy launcher remains
+unimplemented. Existing library integrations supply that composition.
+
 Opaque commands, shells and recursive filesystem mutations are refused, even
 with an allow rule: regexes cannot establish their effects.
 

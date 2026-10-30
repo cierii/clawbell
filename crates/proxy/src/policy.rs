@@ -8,6 +8,7 @@ use clawbell_core::{
     signatures::{catalog_digest, tool_digests},
 };
 use serde_json::Value;
+static SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 use std::{collections::HashMap, sync::Arc};
 
 /// A session-local security decorator. Inner Gate still supplies durable intent /
@@ -21,6 +22,8 @@ pub struct PolicyGate<G> {
     schemas: HashMap<String, jsonschema::Validator>,
     pinned: bool,
     closed: bool,
+    monitor: Option<crate::monitor::Monitor>,
+    session: u64,
 }
 impl<G: Gate> PolicyGate<G> {
     /// Bind owner-configured server identity, immutable policy and private store.
@@ -44,7 +47,17 @@ impl<G: Gate> PolicyGate<G> {
             schemas: HashMap::new(),
             pinned: false,
             closed: false,
+            monitor: None,
+            session: SESSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
+    }
+    /// Attach the owner-private interactive approval channel to this session.
+    /// Use a fresh gate for each session; no approval survives a reconnect.
+    #[must_use]
+    pub fn with_monitor(mut self, monitor: crate::monitor::Monitor) -> Self {
+        let _ = monitor.publish(&serde_json::json!({"server": self.server, "active": true, "sandbox": "not attested by policy gate"}));
+        self.monitor = Some(monitor);
+        self
     }
     fn arguments(&self, tool: &str, arguments: &Value) -> Result<(), Error> {
         if self.closed
@@ -58,6 +71,31 @@ impl<G: Gate> PolicyGate<G> {
             return Err(Error::Denied);
         }
         Ok(())
+    }
+    async fn authorize(&mut self, tool: &str, arguments: &Value) -> Result<(), Error> {
+        let decision = self.policy.evaluate(tool, arguments).decision;
+        if decision != Decision::RequireApproval {
+            return self.arguments(tool, arguments);
+        }
+        if self.closed
+            || !self.pinned
+            || !self
+                .schemas
+                .get(tool)
+                .is_some_and(|v| v.is_valid(arguments))
+        {
+            return Err(Error::Denied);
+        }
+        // The future owns this exact call's rendezvous. It cannot redeem approval
+        // for a different argument, policy snapshot, server or catalog.
+        self.monitor
+            .as_ref()
+            .ok_or(Error::Denied)?
+            .approve(serde_json::json!({
+                "session": self.session, "server": self.server, "tool": tool, "arguments": arguments,
+                "policy": self.policy.version(), "arguments_sha256": clawbell_core::signatures::argument_digest(arguments).map_err(|_| Error::Denied)?, "expires_in_seconds": 25, "scope": self.policy.approval_scope(tool, arguments)
+            }))
+            .await
     }
     async fn check(&mut self, direction: Direction, message: &Envelope) -> Result<(), Error> {
         if self.closed {
@@ -82,7 +120,7 @@ impl<G: Gate> PolicyGate<G> {
                 }
                 Some("tools/call") => {
                     let params = message.value().get("params").ok_or(Error::Denied)?;
-                    self.arguments(
+                    self.authorize(
                         params
                             .get("name")
                             .and_then(Value::as_str)
@@ -90,7 +128,8 @@ impl<G: Gate> PolicyGate<G> {
                         params
                             .get("arguments")
                             .unwrap_or(&Value::Object(serde_json::Map::new())),
-                    )?;
+                    )
+                    .await?;
                 }
                 _ => {}
             }
@@ -170,10 +209,16 @@ impl<G: Gate> Gate for PolicyGate<G> {
             self.closed = true;
             return Err(Error::Denied);
         }
+        if let (Some(monitor), Ok(packet)) = (&self.monitor, &result) {
+            let _ = monitor.publish(packet.value());
+        }
         result
     }
     async fn finish(&mut self) -> Result<(), Error> {
         self.closed = true;
+        if let Some(monitor) = &self.monitor {
+            let _ = monitor.publish(&serde_json::json!({"server": self.server, "active": false}));
+        }
         self.schemas.clear();
         self.inner.finish().await
     }

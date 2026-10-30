@@ -52,3 +52,20 @@ pub fn tool_digests(tools: &[Value]) -> Result<Vec<[u8; 32]>, CatalogError> {
     digests.sort_unstable();
     Ok(digests)
 }
+
+/// Canonical SHA-256 argument binding for a one-use owner decision.
+/// # Errors
+/// Refuses arguments above the protocol inspection bound.
+pub fn argument_digest(arguments: &Value) -> Result<String, CatalogError> {
+    use std::fmt::Write as _;
+    let encoded = serde_json::to_vec(arguments).map_err(|_| CatalogError)?;
+    if encoded.len() > 1024 * 1024 {
+        return Err(CatalogError);
+    }
+    let digest = Sha256::digest([b"clawbell/approval/v1\0".as_slice(), &encoded].concat());
+    let mut result = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(result, "{byte:02x}");
+    }
+    Ok(result)
+}
