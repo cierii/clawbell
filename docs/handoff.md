@@ -1,3 +1,73 @@
+# Handoff — 2026-10-31: deadlines, pin reviews and audit maintenance
+
+Delivered independent CLI/library request, idle and absolute session limits with
+30/600/3600-second production defaults. Native containment receives the same
+configured session lifetime. Paused-clock transport tests read successfully after
+31 idle seconds and at 301 session seconds, then verify expiration despite later
+traffic. Invalid configuration, idle and request deadlines remain fail-closed.
+
+First observations and changed catalogs now stage immutable hash-only proposals
+and deny forwarding until explicit owner acceptance. `pins review`, `accept` and
+`history` preserve the database, existing legacy pins, previous/proposed tool sets
+and UTC acceptance receipts. Superseded/replayed decisions refuse. Existing DLP
+and schema validation run before staging; synthetic secret catalogs create no
+pin or proposal. Review output is a digest diff, not raw descriptions/schemas;
+owners must inspect upstream source independently before accepting.
+
+`audit status`, bounded cursor-based JSONL `view` / private exclusive `export`, and
+lossless offline `rotate --accept` are implemented. Dedicated writers warn at 80%,
+95% and the last 32 pages; new intents refuse in that final reserve. Rotation
+requires all writers stopped, obtains an exclusive SQLite transaction, durably
+archives the complete DELETE-journal database with SHA-256 before transactional
+retention, preserves receipts/append-only triggers and VACUUMs active pages.
+Pin acceptance uses the same exclusive owner maintenance lock to require session
+teardown. Rotation refuses WAL, active writers and failed retention. Archives
+retain unknown outcomes; they are never replayed or automatically deleted.
+
+Files: proxy limits/stdio/HTTP/protocol; CLI launch/management/composition; audit
+storage/maintenance/baseline/operations; CLI/policy/transport/storage regressions;
+native real-CLI release harness; README, release notes and ADR 0010. No dependency
+version changed: libc, serde, serde_json and sha2 were already locked; added audit
+uses are private open flags, typed hash-only output and standard archive hashing.
+Tokio test-util is test-only. AGENTS.md remains unchanged at 199 lines. Both
+pre-existing untracked owner documents remain untouched and excluded from commit.
+
+Verification of the final implementation:
+- MCP Context7: official Tokio time/test-util/deadlines and rusqlite transactions.
+- scripts/check-release.sh exited 0: locked fetch, fmt, all-target Clippy with
+  denied warnings, all workspace tests, release build, CLI help/policy validation,
+  explicit latency gates, native memory/lifecycle/SSH and five real CLI attacks.
+- Added public CLI tests cover explicit pin acceptance/replay/history, audit
+  status warnings, view/export/private modes/overwrite refusal and offline rotate.
+  Storage tests cover legacy pins, stale IDs, active-writer refusal, page warnings
+  and intent reserve, archived correlations, rollback on retention failure and WAL
+  refusal. The real CLI harness explicitly reviews/accepts its first catalog.
+- Final 4,000 warmed encode/parse + policy/schema/DLP/monitor/FULL durable-audit
+  packets: p99 377.606 us, maximum 879.837 us. Full real CLI/native RTT, 2,000
+  samples: p99 0.907 ms, maximum 1.587 ms. Native transport RTT maximum 231.579 us.
+  All measured packets and RTTs stayed below the 5 ms budget.
+- Restricted tool sandbox denied local socket tests; the complete suite passed
+  outside that restriction using real systemd-delegated cgroups and bubblewrap.
+  No product isolation, test or durability requirement was disabled.
+- Fetched origin refs; gitleaks scanned all 11 prior commits and the exact staged
+  candidate with no findings. Re-scan the final index including this handoff before
+  committing. No claim of exhaustive secret detection or remote-fork erasure.
+- Python syntax, changed documentation links/fences, git diff whitespace and
+  AGENTS.md line count passed. No frontend exists or changed; npm/browser checks
+  are not applicable, not claimed as passing.
+
+Operational limits: stop every older binary before maintenance; older versions
+lack the cooperative lock. Read commands target the active audit; archives can be
+opened with SQLite read-only tools. Start export cursors at zero after rotation.
+An interruption before the retention commit can leave an extra archive; only the
+active receipt proves committed retention. Archives use additional disk and require
+explicit owner retention. Inspect source independently of digest review. Latency
+numbers describe warmed bounded workloads on this host, not scheduler/fsync hard
+real-time guarantees or maximum-size messages. GitHub Actions status is separate
+from local verification. Next step: final index scan, commit/push and verify remote.
+
+---
+
 # Handoff — 2026-10-30: host diagnostics and production approvals
 
 Delivered `doctor`, `doctor --self-test`, `demo`, optional production

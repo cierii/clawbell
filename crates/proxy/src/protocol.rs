@@ -259,7 +259,7 @@ impl Session {
                     key,
                     Pending {
                         method: method.into(),
-                        deadline: Instant::now() + self.limits.timeout,
+                        deadline: Instant::now() + self.limits.request_timeout,
                     },
                 );
             }

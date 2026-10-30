@@ -16,6 +16,10 @@ clawbell-core = { path = "../core" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+libc = "0.2"
+sha2 = "0.10"
+serde_json.workspace = true
 
 [lints]
 workspace = true

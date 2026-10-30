@@ -105,7 +105,7 @@ fn call(path: &str) -> std::result::Result<Envelope, Error> {
 #[tokio::test]
 async fn time_shifted_injection_blocked_before_effects() -> Result {
     let directory = Directory::new()?;
-    let store = BaselineStore::open(&directory.0).await?;
+    let store = approved_store(&directory.0).await?;
     let calls = Arc::new(AtomicUsize::new(0));
     let mut gate = PolicyGate::new(
         FixtureGate {
@@ -141,7 +141,7 @@ async fn time_shifted_injection_blocked_before_effects() -> Result {
 #[tokio::test]
 async fn durable_rug_pull_pin_across_sessions_and_server_isolation() -> Result {
     let directory = Directory::new()?;
-    let store = BaselineStore::open(&directory.0).await?;
+    let store = approved_store(&directory.0).await?;
     let snapshot = policy()?;
     let make = |store, server: &str| {
         PolicyGate::new(
@@ -159,7 +159,7 @@ async fn durable_rug_pull_pin_across_sessions_and_server_isolation() -> Result {
     )
     .await?;
     drop(store);
-    let reopened = BaselineStore::open(&directory.0).await?;
+    let reopened = approved_store(&directory.0).await?;
     catalog(
         &mut make(reopened.clone(), "server-a")?,
         vec![tool("Original")],
@@ -202,7 +202,7 @@ async fn durable_rug_pull_pin_across_sessions_and_server_isolation() -> Result {
 #[tokio::test]
 async fn notifications_schema_failure_and_incomplete_catalog_deny() -> Result {
     let directory = Directory::new()?;
-    let store = BaselineStore::open(&directory.0).await?;
+    let store = approved_store(&directory.0).await?;
     let snapshot = policy()?;
     let make = || {
         PolicyGate::new(
@@ -253,22 +253,22 @@ async fn notifications_schema_failure_and_incomplete_catalog_deny() -> Result {
 async fn private_storage_and_sqlite_failures_are_closed() -> Result {
     let directory = Directory::new()?;
     fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o755))?;
-    assert!(BaselineStore::open(&directory.0).await.is_err());
+    assert!(approved_store(&directory.0).await.is_err());
     fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o700))?;
     let path = directory.0.join("tool-baselines.sqlite3");
     fs::write(&path, "invalid sqlite")?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    assert!(BaselineStore::open(&directory.0).await.is_err());
+    assert!(approved_store(&directory.0).await.is_err());
     fs::remove_file(&path)?;
     std::os::unix::fs::symlink("/dev/null", &path)?;
-    assert!(BaselineStore::open(&directory.0).await.is_err());
+    assert!(approved_store(&directory.0).await.is_err());
     Ok(())
 }
 #[tokio::test]
 #[ignore = "explicit release performance experiment"]
 async fn policy_packet_under_five_ms() -> Result {
     let directory = Directory::new()?;
-    let store = BaselineStore::open(&directory.0).await?;
+    let store = approved_store(&directory.0).await?;
     let mut gate = PolicyGate::new(
         FixtureGate {
             calls: Arc::default(),
@@ -299,7 +299,7 @@ async fn policy_packet_under_five_ms() -> Result {
 #[tokio::test]
 async fn approval_is_non_executable_and_schema_changes_are_pinned() -> Result {
     let directory = Directory::new()?;
-    let store = BaselineStore::open(&directory.0).await?;
+    let store = approved_store(&directory.0).await?;
     let original = policy()?;
     let source = r#"
 version = "approval"
@@ -361,7 +361,7 @@ impl Gate for MutatingFixture {
 #[tokio::test]
 async fn inner_adapter_cannot_replace_checked_arguments() -> Result {
     let directory = Directory::new()?;
-    let store = BaselineStore::open(&directory.0).await?;
+    let store = approved_store(&directory.0).await?;
     let mut gate = PolicyGate::new(MutatingFixture, policy()?, store, "server".into())?;
     catalog(&mut gate, vec![tool("Original")]).await?;
     assert!(
@@ -375,7 +375,7 @@ async fn inner_adapter_cannot_replace_checked_arguments() -> Result {
 #[tokio::test]
 async fn catalog_refresh_has_no_stale_execution_window() -> Result {
     let directory = Directory::new()?;
-    let store = BaselineStore::open(&directory.0).await?;
+    let store = approved_store(&directory.0).await?;
     let calls = Arc::new(AtomicUsize::new(0));
     let mut gate = PolicyGate::new(
         FixtureGate {
@@ -441,7 +441,7 @@ decision = "require_approval"
             calls: calls.clone(),
         },
         policy,
-        BaselineStore::open(&directory.0).await?,
+        approved_store(&directory.0).await?,
         "owner-server".into(),
     )?
     .with_monitor(monitor);
@@ -465,4 +465,38 @@ decision = "require_approval"
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     server.abort();
     Ok(())
+}
+
+// Explicit owner approvals for the synthetic catalogs used by these policy tests.
+async fn approved_store(
+    path: &std::path::Path,
+) -> std::result::Result<BaselineStore, Box<dyn std::error::Error + Send + Sync>> {
+    use clawbell_core::signatures::{catalog_digest, tool_digests};
+    let store = BaselineStore::open(path).await?;
+    for (server, description) in [
+        ("owner-pinned-server", "Append notes"),
+        ("server-a", "Original"),
+        ("server-b", "Different server"),
+        ("server", "Original"),
+        ("approval-server", "Original"),
+        ("owner-server", "synthetic"),
+    ] {
+        let tools = vec![tool(description)];
+        if store
+            .check(server, catalog_digest(&tools)?, tool_digests(&tools)?)
+            .await
+            .is_err()
+        {
+            let review = store
+                .review()
+                .await?
+                .into_iter()
+                .find(|r| r.server == server)
+                .ok_or("missing_review")?;
+            if review.previous.is_none() {
+                store.accept(review.id).await?;
+            }
+        }
+    }
+    Ok(store)
 }

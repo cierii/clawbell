@@ -2,11 +2,7 @@
 //! Full durability is acknowledged before callers may forward operations. A hard
 //! database size/event limit stops new operations; no silent deletion/retention.
 use rusqlite::{Connection, params};
-use std::{
-    fs::OpenOptions,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::Path,
-};
+use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
 /// Static storage failure; never exposes SQL, paths or request data.
 #[derive(Debug, thiserror::Error)]
@@ -163,6 +159,9 @@ impl OperationStore {
         std::thread::Builder::new()
             .name("clawbell-audit".into())
             .spawn(move || {
+                let Ok(_lock) = crate::storage::lock(&directory, "operations.lock", false) else {
+                    let _ = ready.send(Err(AuditError)); return;
+                };
                 let Ok(connection) = open(&directory) else {
                     let _ = ready.send(Err(AuditError));
                     return;
@@ -177,7 +176,9 @@ impl OperationStore {
                 if ready.send(Ok(())).is_err() {
                     return;
                 }
+                let mut warned = 0;
                 while let Some(write) = receiver.blocking_recv() {
+                    warn_capacity(&connection, &mut warned);
                     let result = append(
                         &connection,
                         &policy_digest,
@@ -227,29 +228,14 @@ impl OperationStore {
     }
 }
 fn open(directory: &Path) -> Result<Connection, AuditError> {
-    let meta = std::fs::symlink_metadata(directory).map_err(|_| AuditError)?;
-    if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
-        return Err(AuditError);
-    }
+    let _file =
+        crate::storage::private(directory, "operations.sqlite3", true).map_err(|_| AuditError)?;
     let path = directory.join("operations.sqlite3");
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-    {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return Err(AuditError),
-    }
-    let meta = std::fs::symlink_metadata(&path).map_err(|_| AuditError)?;
-    if !meta.is_file() || meta.permissions().mode() & 0o077 != 0 {
-        return Err(AuditError);
-    }
     let mut connection = Connection::open(path).map_err(|_| AuditError)?;
     connection
         .busy_timeout(std::time::Duration::from_millis(100))
         .map_err(|_| AuditError)?;
+    warn_capacity(&connection, &mut 0);
     connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=16384;
         CREATE TABLE IF NOT EXISTS events_v1 (
             id INTEGER PRIMARY KEY, correlation INTEGER NOT NULL,
@@ -316,6 +302,12 @@ fn append(
     session: &str,
     upstream: &str,
 ) -> Result<i64, AuditError> {
+    let pages: u32 = connection
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .map_err(|_| AuditError)?;
+    if matches!(outcome, Outcome::Intent) && pages >= crate::maintenance::PAGE_LIMIT - 32 {
+        return Err(AuditError);
+    }
     let inserted = connection
         .execute(
             "INSERT INTO events_v1(correlation,policy_sha256,outcome,reason,session_id,upstream_sha256)
@@ -331,9 +323,23 @@ fn append(
     Ok(connection.last_insert_rowid())
 }
 
+fn warn_capacity(connection: &Connection, warned: &mut u8) {
+    if let Ok(status) = crate::maintenance::capacity(connection) {
+        let level = status.warning_level;
+        if level > *warned {
+            eprintln!(
+                "audit_capacity_warning: level={level} pages={} limit={}; stop sessions and run clawbell audit rotate --accept",
+                status.pages, status.page_limit
+            );
+            *warned = level;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     type Result = std::result::Result<(), Box<dyn std::error::Error>>;

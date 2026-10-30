@@ -1,3 +1,14 @@
+# Owner deadlines and database maintenance
+
+- Split proxy request, idle and absolute session limits; defaults are 30/600/3600 s.
+  The production runner uses the same configured absolute lifetime.
+- New identities and changed catalogs require explicit `pins review` / `accept`;
+  hash-only diffs and `history` preserve previous pins and migration receipts.
+- Add `audit status`, bounded JSONL `view` / private `export` and lossless offline
+  `rotate --accept`. Warn at 80%/95% capacity and reserve 32 pages for outcomes.
+- Stop sessions before pin acceptance or rotation. Existing pins remain enforced;
+  databases are not reset. See [ADR 0010](adr/0010-timeouts-pins-and-audit-maintenance.md).
+
 # Security fixes — audit A-03–A-07
 
 - Inspect semantic text fragments and deny incomplete known-secret prefixes before

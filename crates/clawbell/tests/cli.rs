@@ -111,3 +111,119 @@ fn diagnostics_fail_closed_without_real_delegation() -> Result {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn public_pin_review_acceptance_and_migration_history() -> Result {
+    use clawbell_audit::baseline::BaselineStore;
+    let root = std::env::temp_dir().join(format!("clawbell-cli-pins-{}", std::process::id()));
+    fs::create_dir(&root)?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    let store = BaselineStore::open(&root).await?;
+    assert!(
+        store
+            .check("synthetic-owner", [1; 32], vec![[2; 32]])
+            .await
+            .is_err()
+    );
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_clawbell"))
+            .arg("pins")
+            .arg("--state-dir")
+            .arg(&root)
+            .args(args)
+            .output()
+    };
+    let review = run(&["review"])?;
+    assert!(review.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&review.stdout)?;
+    let id = value[0]["id"].as_i64().ok_or("missing_review")?.to_string();
+    assert_eq!(value[0]["added"][0].as_str().ok_or("digest")?.len(), 64);
+    assert!(!run(&["accept", "--review-id", &id])?.status.success());
+    assert!(
+        run(&["accept", "--review-id", &id, "--accept"])?
+            .status
+            .success()
+    );
+    assert!(
+        !run(&["accept", "--review-id", &id, "--accept"])?
+            .status
+            .success()
+    );
+    store
+        .check("synthetic-owner", [1; 32], vec![[2; 32]])
+        .await?;
+    assert!(
+        store
+            .check("synthetic-owner", [3; 32], vec![[4; 32]])
+            .await
+            .is_err()
+    );
+    let history: serde_json::Value = serde_json::from_slice(&run(&["history"])?.stdout)?;
+    assert_eq!(history.as_array().ok_or("history")?.len(), 2);
+    assert!(history[1]["accepted_utc"].is_string());
+    assert_eq!(history[0]["removed"][0], "02".repeat(32));
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn public_audit_status_view_export_and_offline_rotation() -> Result {
+    use clawbell_audit::operations::{OperationStore, Outcome};
+    let root = std::env::temp_dir().join(format!("clawbell-cli-audit-{}", std::process::id()));
+    fs::create_dir(&root)?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    let store = OperationStore::open(&root, "a".repeat(64)).await?;
+    store.record(0, Outcome::Intent).await?;
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_clawbell"))
+            .arg("audit")
+            .arg("--state-dir")
+            .arg(&root)
+            .args(args)
+            .output()
+    };
+    let status = run(&["status"])?;
+    assert!(status.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&status.stdout)?["page_limit"],
+        16384
+    );
+    let database = rusqlite::Connection::open(root.join("operations.sqlite3"))?;
+    database.execute_batch("CREATE TABLE synthetic_fill(data BLOB); INSERT INTO synthetic_fill VALUES(zeroblob(55000000));")?;
+    assert!(String::from_utf8(run(&["status"])?.stderr)?.contains("audit_capacity_warning"));
+    database.execute_batch("DROP TABLE synthetic_fill; VACUUM;")?;
+    drop(database);
+    let view = run(&["view", "--limit", "1"])?;
+    assert!(view.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&view.stdout)?["outcome"],
+        "allow_intent"
+    );
+    let path = root.join("export.jsonl");
+    let output = path.to_str().ok_or("utf8")?;
+    assert!(run(&["export", "--output", output])?.status.success());
+    assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+    assert_eq!(fs::read(&path)?, view.stdout);
+    assert!(!run(&["export", "--output", output])?.status.success());
+    assert!(!run(&["rotate"])?.status.success());
+    assert!(!run(&["rotate", "--accept"])?.status.success());
+    drop(store);
+    let mut rotated = false;
+    for _ in 0..100 {
+        if run(&["rotate", "--accept"])?.status.success() {
+            rotated = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(rotated);
+    assert_eq!(run(&["view"])?.stdout, Vec::<u8>::new());
+    assert!(fs::read_dir(&root)?.any(|e| e.is_ok_and(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("operations-")
+    })));
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

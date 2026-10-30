@@ -58,6 +58,10 @@ decision = "allow"
     )?))
 }
 async fn gate(dir: &Directory) -> Result<impl Gate + use<>> {
+    approved_baseline(dir, "synthetic-owner-upstream", "Read notes").await?;
+    raw_gate(dir).await
+}
+async fn raw_gate(dir: &Directory) -> Result<impl Gate + use<>> {
     compose(
         policy()?,
         BaselineStore::open(&dir.0).await?,
@@ -166,7 +170,8 @@ async fn attack_3_soul_replacement_cannot_override_explicit_allow() -> Result<()
 #[tokio::test]
 async fn attack_4_rug_pull_is_denied_across_reconnects() -> Result<()> {
     let dir = Directory::new()?;
-    let mut proxy = gate(&dir).await?;
+    approved_baseline(&dir, "synthetic-owner-upstream", "Reviewed catalog").await?;
+    let mut proxy = raw_gate(&dir).await?;
     catalog(&mut proxy, "Reviewed catalog").await?;
     proxy.finish().await?;
     let mut proxy = gate(&dir).await?;
@@ -211,7 +216,7 @@ async fn complete_mvp_gate_packets_under_five_ms() -> Result<()> {
     let dir = Directory::new()?;
     let mut proxy = compose_monitor(
         policy()?,
-        BaselineStore::open(&dir.0).await?,
+        approved_baseline(&dir, "synthetic-owner-upstream", "Read notes").await?,
         OperationStore::open(&dir.0, "a".repeat(64)).await?,
         "synthetic-owner-upstream".into(),
         Some(clawbell_proxy::monitor::Monitor::new()?),
@@ -360,7 +365,7 @@ async fn audit_a06_secret_catalog_refuses_before_first_pin_and_clean_reconnect_s
 -> Result<()> {
     let dir = Directory::new()?;
     for _ in 0..2 {
-        let mut proxy = gate(&dir).await?;
+        let mut proxy = raw_gate(&dir).await?;
         assert!(
             catalog(&mut proxy, "TEST_TOKEN=synthetic-catalog-value")
                 .await
@@ -368,14 +373,17 @@ async fn audit_a06_secret_catalog_refuses_before_first_pin_and_clean_reconnect_s
         );
         proxy.finish().await?;
         let connection = rusqlite::Connection::open(dir.0.join("tool-baselines.sqlite3"))?;
-        assert_eq!(
-            connection.query_row("SELECT count(*) FROM tool_baselines_v1", [], |row| row
-                .get::<_, i64>(0))?,
-            0
-        );
+        for table in ["tool_baselines_v1", "pin_reviews_v1"] {
+            assert_eq!(
+                connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+        }
     }
+    approved_baseline(&dir, "synthetic-owner-upstream", "Reviewed clean catalog").await?;
     for _ in 0..2 {
-        let mut proxy = gate(&dir).await?;
+        let mut proxy = raw_gate(&dir).await?;
         catalog(&mut proxy, "Reviewed clean catalog").await?;
         proxy.finish().await?;
     }
@@ -423,7 +431,8 @@ async fn audit_a04_terminal_errors_before_gate_are_durable_and_payload_free() ->
             &mut proxy,
             Limits {
                 message_bytes: limit,
-                timeout: std::time::Duration::from_millis(timeout),
+                request_timeout: std::time::Duration::from_millis(timeout),
+                idle_timeout: std::time::Duration::from_millis(timeout),
                 ..Limits::default()
             },
         )
@@ -579,7 +588,7 @@ decision = "require_approval"
     )?);
     let mut proxy = compose_monitor(
         owner_policy,
-        BaselineStore::open(&dir.0).await?,
+        approved_baseline(&dir, "synthetic", "synthetic").await?,
         OperationStore::open(&dir.0, "a".repeat(64)).await?,
         "synthetic".into(),
         Some(monitor),
@@ -623,4 +632,30 @@ decision = "require_approval"
     server.abort();
     let _ = server.await;
     Ok(())
+}
+
+async fn approved_baseline(
+    dir: &Directory,
+    server: &str,
+    description: &str,
+) -> Result<BaselineStore> {
+    use clawbell_core::signatures::{catalog_digest, tool_digests};
+    let store = BaselineStore::open(&dir.0).await?;
+    let catalog = tools(description).as_array().ok_or("tools")?.clone();
+    if store
+        .check(server, catalog_digest(&catalog)?, tool_digests(&catalog)?)
+        .await
+        .is_err()
+    {
+        let review = store
+            .review()
+            .await?
+            .into_iter()
+            .find(|r| r.server == server)
+            .ok_or("missing_review")?;
+        if review.previous.is_none() {
+            store.accept(review.id).await?;
+        }
+    }
+    Ok(store)
 }

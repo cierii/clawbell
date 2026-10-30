@@ -39,7 +39,11 @@ pub struct Limits {
     /// Maximum buffered messages per queue.
     pub queue: usize,
     /// Deadline for requests and individual I/O operations.
-    pub timeout: Duration,
+    pub request_timeout: Duration,
+    /// Maximum silence between complete messages when no request is pending.
+    pub idle_timeout: Duration,
+    /// Absolute lifetime, never extended by traffic.
+    pub session_lifetime: Duration,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -47,7 +51,9 @@ impl Default for Limits {
             message_bytes: 1024 * 1024,
             pending: 32,
             queue: 32,
-            timeout: Duration::from_secs(30),
+            request_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(600),
+            session_lifetime: Duration::from_secs(3600),
         }
     }
 }
@@ -63,8 +69,12 @@ impl Limits {
             || self.pending > 1024
             || self.queue == 0
             || self.queue > 1024
-            || self.timeout.is_zero()
-            || self.timeout > Duration::from_secs(300)
+            || self.request_timeout.is_zero()
+            || self.request_timeout > Duration::from_secs(300)
+            || self.idle_timeout.is_zero()
+            || self.idle_timeout > Duration::from_hours(24)
+            || self.session_lifetime.is_zero()
+            || self.session_lifetime > Duration::from_hours(24)
         {
             return Err(Error::Limit);
         }
@@ -172,7 +182,7 @@ pub(crate) async fn inspect<G: Gate>(
     message: &Envelope,
     limits: Limits,
 ) -> Result<Envelope, Error> {
-    let inspected = tokio::time::timeout(limits.timeout, gate.inspect(direction, message))
+    let inspected = tokio::time::timeout(limits.request_timeout, gate.inspect(direction, message))
         .await
         .map_err(|_| Error::Timeout)??;
     let checked = Envelope::parse(&inspected.encode()?, direction, limits.message_bytes)?;

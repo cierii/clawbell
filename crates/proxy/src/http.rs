@@ -45,12 +45,14 @@ impl Target {
         }
         let host = url.host_str().ok_or(Error::Denied)?;
         let port = url.port_or_known_default().ok_or(Error::Denied)?;
-        let addresses: Vec<SocketAddr> =
-            tokio::time::timeout(limits.timeout, tokio::net::lookup_host((host, port)))
-                .await
-                .map_err(|_| Error::Timeout)?
-                .map_err(|_| Error::Transport)?
-                .collect();
+        let addresses: Vec<SocketAddr> = tokio::time::timeout(
+            limits.request_timeout,
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::Transport)?
+        .collect();
         if addresses.is_empty() || addresses.len() > 32 {
             return Err(Error::Denied);
         }
@@ -71,8 +73,8 @@ impl Target {
             .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none())
             .resolve_to_addrs(host, &addresses)
-            .timeout(limits.timeout)
-            .connect_timeout(limits.timeout)
+            .timeout(limits.request_timeout)
+            .connect_timeout(limits.request_timeout)
             .build()
             .map_err(|_| Error::Transport)?;
         Ok(Self { client, url })
@@ -273,7 +275,7 @@ where
                     if posts.len() >= limits.pending { return Err(Error::Limit); }
                     let target = target.clone(); let events = events.clone();
                     posts.spawn(async move {
-                        let messages = tokio::time::timeout(limits.timeout, target.post(wire, limits)).await.map_err(|_| Error::Timeout)??;
+                        let messages = tokio::time::timeout(limits.request_timeout, target.post(wire, limits)).await.map_err(|_| Error::Timeout)??;
                         for bytes in messages {
                             events.try_send(Ok((Direction::Server, bytes))).map_err(|_| Error::Limit)?;
                         }

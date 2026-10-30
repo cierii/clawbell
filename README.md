@@ -127,10 +127,13 @@ retrieval. `require_approval` uses the optional `proxy --monitor-socket PATH`
 endpoint; without a connected owner it denies. `clawbell monitor --socket PATH`
 connects that owner-private IPC endpoint. There is no web panel, HTTP listener or token initialization in this MVP.
 
-Tool catalogs use persistent TOFU pins covering names, descriptions, schemas and
-metadata. Changed catalogs or list-change notifications terminate the session;
-there is no automatic reset/re-pin. TOFU cannot certify the first catalog or detect
-server-code changes with unchanged metadata. Server identity is bound to the
+Tool catalogs use persistent owner-reviewed pins covering names, descriptions,
+schemas and metadata. First observation and changed catalogs stage a hash-only
+review proposal and terminate the session before the catalog reaches the client.
+The owner must review and explicitly accept the proposal, then reconnect; there
+is no automatic reset/re-pin. Existing legacy pins remain enforced. A pin cannot
+certify catalog safety or detect server-code changes with unchanged metadata.
+Server identity is bound to the
 owner name, workspace, command and arguments; installer names also include the
 client configuration's path digest.
 
@@ -171,8 +174,10 @@ schemas migrate additively; older rows retain explicit legacy identities/reasons
 Intent rows without a corresponding outcome mean **unknown**, including
 a process crash. They are never replayed. Append-only triggers prevent routine
 updates/deletes, not a compromised owner/administrator. The database is bounded
-by 16,384 SQLite pages (normally 64 MiB); exhaustion stops new operations. No
-unaudited automatic deletion/retention is implemented. Store audit/baselines in an
+by 16,384 SQLite pages (normally 64 MiB). Fixed stderr warnings appear at 80% and
+95%; the last 32 pages refuse new intents to reserve space for results. Explicit
+owner rotation archives all events before reclaiming active pages; there is no
+automatic deletion/retention. Store audit/baselines in an
 existing private 0700 directory outside workspace/system runtime mounts, with
 trusted ancestors; files are 0600. See [ADR 0006](docs/adr/0006-mvp-installer-and-audit.md).
 
@@ -182,6 +187,69 @@ workspace plus private temporary storage. Seccomp and cgroups bound the whole
 process tree. Cancellation, deadlines and Drop kill descendants. Remote operations
 and processes started outside this runner remain outside local enforcement.
 See [ADR 0004](docs/adr/0004-native-process-containment.md).
+
+## Deadlines and database maintenance
+
+The launcher exposes independent owner settings:
+
+```bash
+clawbell proxy --idle-timeout-secs 600 --request-timeout-secs 30 \
+  --session-lifetime-secs 3600 \
+  --policy /absolute/policy.toml --workspace /absolute/credential-free-server \
+  --state-dir /absolute/private-state --cgroup-parent /sys/fs/cgroup/delegated \
+  --server reviewed-upstream -- /usr/bin/python3 -B /workspace/server.py
+```
+
+These are the defaults. Idle means silence between complete messages with no
+outstanding request; request deadlines are never renewed by unrelated traffic.
+Session lifetime is absolute, applies to the native process tree, and is not
+extended by activity. Idle/lifetime ranges are 1–86400 s, requests 1–300 s. Thus a
+healthy session can read after 31 idle seconds and after 301 session seconds.
+
+On the first `tools/list`, expect refusal and a fixed review hint on stderr.
+Stop all proxy sessions using the state directory, inspect the upstream package
+and proposed catalog/tool SHA-256 differences, then accept the exact review ID:
+
+```bash
+clawbell pins --state-dir /absolute/private-state review
+clawbell pins --state-dir /absolute/private-state accept --review-id 1 --accept
+clawbell pins --state-dir /absolute/private-state history
+```
+
+Use the ID actually returned by `review`. The diff lists previous/proposed catalog
+hashes and removed/added tool hashes; raw descriptions/schemas are deliberately
+not retained. Verify upstream source independently. Changed tools appear as removal
+plus addition. Replayed or superseded acceptance refuses. Reconnect after approval.
+History keeps immutable proposals, old/new tool signatures and UTC acceptance times;
+existing databases are preserved, including previous pins. `history` shows the
+latest 256 proposals. A changed catalog never grants execution by itself.
+
+Audit reads do not create sessions or replay operations:
+
+```bash
+clawbell audit --state-dir /absolute/private-state status
+clawbell audit --state-dir /absolute/private-state view --after 0 --limit 100
+clawbell audit --state-dir /absolute/private-state export \
+  --output /absolute/new-audit.jsonl --after 0 --limit 100000
+# Stop all sessions before this explicit owner action:
+clawbell audit --state-dir /absolute/private-state rotate --accept
+```
+
+JSONL exports are new 0600 files and never overwrite existing output. Page through
+large logs with the last event ID as exclusive `--after`; `--limit` is bounded at
+100000. Start again at `--after 0` after rotation; IDs belong to one database
+generation. Status reports allocated pages, page size, quota and warning level. The
+writer also emits visible capacity warnings on stderr before intent refusal.
+
+Rotation refuses while any writer is active. It fsyncs a full private SQLite
+archive, preserves all sessions/correlations/unknown intents, records its filename,
+SHA-256 and UTC time in the active append-only rotation ledger, then reclaims event
+pages. Archives stay in the state directory; retain them to retain history. They
+consume disk beyond the active quota and are not automatically deleted. Archives
+can be inspected with SQLite in read-only mode. Stop older clawbell versions before
+maintenance; they do not participate in the new cooperative lock. See
+[ADR 0010](docs/adr/0010-timeouts-pins-and-audit-maintenance.md) for migration,
+interruption recovery, locking and exact limits.
 
 ## Verification and release
 

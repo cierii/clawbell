@@ -3,6 +3,7 @@ mod bind;
 mod diagnostics;
 mod files;
 mod launch;
+mod manage;
 mod scan;
 use clap::{Parser, Subcommand};
 use clawbell_proxy::monitor::{Command, Event, frame};
@@ -26,6 +27,10 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Review and explicitly accept first-launch or changed catalog baselines.
+    Pins(manage::Pins),
+    /// Inspect, export and rotate the private SQLite operation log.
+    Audit(manage::Audit),
     /// Check native host prerequisites; optionally exercise adversarial probes.
     Doctor(diagnostics::Options),
     /// Run the synthetic containment and durable-audit demonstration.
@@ -107,6 +112,14 @@ fn configurations(config: Vec<PathBuf>) -> files::Result<Vec<PathBuf>> {
 }
 async fn dispatch(action: Action) -> files::Result<i32> {
     match action {
+        Action::Pins(options) => manage::pins(options).await?,
+        Action::Audit(options) => {
+            tokio::task::spawn_blocking(move || {
+                manage::audit(options).map_err(|_| "audit_maintenance_failed".to_owned())
+            })
+            .await?
+            .map_err(std::io::Error::other)?;
+        }
         Action::Doctor(options) => diagnostics::run(options).await?,
         Action::Demo(options) => {
             diagnostics::run(diagnostics::Options {
@@ -289,6 +302,39 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn independent_proxy_deadline_configuration() -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        for (flag, value) in [
+            ("--idle-timeout-secs", "0"),
+            ("--request-timeout-secs", "301"),
+            ("--session-lifetime-secs", "86401"),
+        ] {
+            let cli = Cli::try_parse_from([
+                "clawbell",
+                "proxy",
+                "--policy",
+                "/policy",
+                "--workspace",
+                "/workspace",
+                "--state-dir",
+                "/state",
+                "--cgroup-parent",
+                "/cgroup",
+                "--server",
+                "synthetic",
+                flag,
+                value,
+                "--",
+                "/usr/bin/true",
+            ])?;
+            let Action::Proxy(options) = cli.command else {
+                return Err("proxy_required".into());
+            };
+            assert!(options.limits().is_err());
+        }
+        Ok(())
+    }
     #[test]
     fn peer_terminal_controls_are_never_executed() {
         let display = super::colored("\x1b]52;clipboard\x07");

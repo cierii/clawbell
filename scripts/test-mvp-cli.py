@@ -123,7 +123,20 @@ decision = "allow"
         finally:
             finish(peer)
 
-    # First exercise successful data flow and measure the entire running proxy.
+    # First observation refuses forwarding, then the owner reviews/accepts the
+    # exact captured candidate. No test deletes or rewrites the pin database.
+    peer = start()
+    try:
+        assert initialize(peer) is None
+    finally:
+        finish(peer)
+    review = subprocess.run([str(BINARY), "pins", "--state-dir", str(state), "review"], capture_output=True, check=True, timeout=10)
+    candidates = json.loads(review.stdout)
+    assert len(candidates) == 1 and candidates[0]["previous"] is None
+    approved = subprocess.run([str(BINARY), "pins", "--state-dir", str(state), "accept", "--review-id", str(candidates[0]["id"]), "--accept"], capture_output=True, timeout=10)
+    assert approved.returncode == 0
+
+    # Exercise successful data flow and measure the entire running proxy.
     peer = start()
     samples = []
     try:

@@ -319,7 +319,11 @@ name = "clawbell-audit"
 version = "0.1.0"
 dependencies = [
  "clawbell-core",
+ "libc",
  "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
 ]

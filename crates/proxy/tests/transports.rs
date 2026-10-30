@@ -252,7 +252,8 @@ async fn stalled_request_expires() -> TestResult {
             sw,
             &mut g,
             Limits {
-                timeout: Duration::from_millis(50),
+                request_timeout: Duration::from_millis(50),
+                idle_timeout: Duration::from_millis(50),
                 ..Limits::default()
             },
         )
@@ -664,5 +665,93 @@ async fn vault_denies_wrong_tool_forgery_raw_secrets_and_finished_session() -> T
     gate.finish().await?;
     assert!(gate.inspect(Direction::Client, &request).await.is_err());
     assert!(!gate.permits_remote());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn reads_after_31_idle_seconds_and_301_session_seconds() -> TestResult {
+    let (client, proxy_client) = tokio::io::duplex(65536);
+    let (server, proxy_server) = tokio::io::duplex(65536);
+    let (cr, cw) = tokio::io::split(proxy_client);
+    let (sr, sw) = tokio::io::split(proxy_server);
+    let proxy = tokio::spawn(async move {
+        let mut gate = FixtureGate::default();
+        stdio::relay(cr, cw, sr, sw, &mut gate, Limits::default()).await
+    });
+    let (read, mut write) = tokio::io::split(client);
+    let mut client_read = BufReader::new(read);
+    let (read, mut upstream_write) = tokio::io::split(server);
+    let mut upstream_read = BufReader::new(read);
+    send(&mut write, &init()).await?;
+    assert_eq!(recv(&mut upstream_read).await?, init());
+    send(&mut upstream_write, &init_result()).await?;
+    recv(&mut client_read).await?;
+    send(&mut write, &initialized()).await?;
+    recv(&mut upstream_read).await?;
+    for (id, seconds) in [(2, 31), (3, 270)] {
+        tokio::time::advance(Duration::from_secs(seconds)).await;
+        send(&mut write, &ping(id)).await?;
+        assert_eq!(recv(&mut upstream_read).await?, ping(id));
+        send(&mut upstream_write, &result(id)).await?;
+        assert_eq!(recv(&mut client_read).await?, result(id));
+    }
+    // Activity near the lifetime boundary cannot extend the session.
+    for id in 4..15 {
+        tokio::time::advance(Duration::from_secs(if id == 14 { 298 } else { 300 })).await;
+        send(&mut write, &ping(id)).await?;
+        assert_eq!(recv(&mut upstream_read).await?, ping(id));
+        send(&mut upstream_write, &result(id)).await?;
+        recv(&mut client_read).await?;
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(matches!(proxy.await?, Err(Error::Timeout)));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn independent_idle_request_and_absolute_deadlines() -> TestResult {
+    // Traffic cannot extend a request deadline. A response is rejected even if
+    // an unrelated request arrived immediately before its deadline.
+    let limits = Limits {
+        request_timeout: Duration::from_secs(10),
+        ..Limits::default()
+    };
+    let mut session = ready(limits)?;
+    session.accept(Direction::Client, &parse(&ping(2), Direction::Client)?)?;
+    tokio::time::advance(Duration::from_secs(9)).await;
+    session.accept(Direction::Client, &parse(&ping(3), Direction::Client)?)?;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(matches!(
+        session.accept(Direction::Server, &parse(&result(2), Direction::Server)?),
+        Err(Error::Timeout)
+    ));
+    for (idle, lifetime, elapsed) in [(5, 100, 6), (100, 5, 6)] {
+        let (_client, proxy_client) = tokio::io::duplex(64);
+        let (_server, proxy_server) = tokio::io::duplex(64);
+        let (cr, cw) = tokio::io::split(proxy_client);
+        let (sr, sw) = tokio::io::split(proxy_server);
+        let proxy = tokio::spawn(async move {
+            let mut gate = FixtureGate::default();
+            let result = stdio::relay(
+                cr,
+                cw,
+                sr,
+                sw,
+                &mut gate,
+                Limits {
+                    idle_timeout: Duration::from_secs(idle),
+                    session_lifetime: Duration::from_secs(lifetime),
+                    ..Limits::default()
+                },
+            )
+            .await;
+            (result, gate.finished)
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(elapsed)).await;
+        let (result, finished) = proxy.await?;
+        assert!(matches!(result, Err(Error::Timeout)));
+        assert!(finished);
+    }
     Ok(())
 }

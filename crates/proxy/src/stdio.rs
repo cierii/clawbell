@@ -93,7 +93,7 @@ pub(crate) fn reader<R: AsyncRead + Unpin + Send + 'static>(
                 }
             }
             // Bounded send has its own deadline; overload cannot hang a reader.
-            tokio::time::timeout(limits.timeout, events.send(Ok((direction, line))))
+            tokio::time::timeout(limits.request_timeout, events.send(Ok((direction, line))))
                 .await
                 .map_err(|_| Error::Timeout)?
                 .map_err(|_| Error::Closed)?;
@@ -108,7 +108,7 @@ pub(crate) fn writer<W: AsyncWrite + Unpin + Send + 'static>(
 ) {
     tasks.spawn(async move {
         while let Some(wire) = queue.recv().await {
-            tokio::time::timeout(limits.timeout, async {
+            tokio::time::timeout(limits.request_timeout, async {
                 write.write_all(&wire.bytes).await?;
                 write.write_all(b"\n").await?;
                 write.flush().await
@@ -130,11 +130,11 @@ pub(crate) async fn drive<G: Gate>(
     terminate_on_cancel: bool,
 ) -> Result<(), Error> {
     let mut session = Session::new(limits)?;
+    let expires = tokio::time::Instant::now() + limits.session_lifetime;
+    let mut idle = tokio::time::Instant::now() + limits.idle_timeout;
     let result = async {
         loop {
-            let deadline = session
-                .deadline()
-                .unwrap_or_else(|| tokio::time::Instant::now() + limits.timeout);
+            let deadline = session.deadline().unwrap_or(idle).min(expires);
             let event = tokio::select! {
                 biased;
                 () = tokio::time::sleep_until(deadline) => return Err(Error::Timeout),
@@ -147,8 +147,19 @@ pub(crate) async fn drive<G: Gate>(
             };
             let (direction, bytes) = event;
             let envelope = Envelope::parse(&bytes, direction, limits.message_bytes)?;
+            let before = session.deadline().unwrap_or(expires);
             session.accept(direction, &envelope)?;
-            let checked = inspect(gate, direction, &envelope, limits).await?;
+            let checked = tokio::time::timeout_at(
+                session
+                    .deadline()
+                    .unwrap_or(expires)
+                    .min(before)
+                    .min(expires),
+                inspect(gate, direction, &envelope, limits),
+            )
+            .await
+            .map_err(|_| Error::Timeout)??;
+            idle = tokio::time::Instant::now() + limits.idle_timeout;
             if terminate_on_cancel
                 && direction == Direction::Client
                 && checked.method() == Some("notifications/cancelled")
@@ -181,14 +192,14 @@ async fn complete<G: Gate>(
     limits: Limits,
 ) -> Result<(), Error> {
     let terminal = if let Err(error) = &result {
-        tokio::time::timeout(limits.timeout, gate.terminated(error.reason()))
+        tokio::time::timeout(limits.request_timeout, gate.terminated(error.reason()))
             .await
             .map_err(|_| Error::Timeout)
             .and_then(std::convert::identity)
     } else {
         Ok(())
     };
-    let finish = tokio::time::timeout(limits.timeout, gate.finish())
+    let finish = tokio::time::timeout(limits.request_timeout, gate.finish())
         .await
         .map_err(|_| Error::Timeout)
         .and_then(std::convert::identity);
@@ -220,12 +231,12 @@ where
         Ok(limits) => limits,
         Err(error) => return complete(gate, Err(error), Limits::default()).await,
     };
-    let launch = tokio::time::timeout(limits.timeout, runner.spawn()).await;
+    let launch = tokio::time::timeout(limits.request_timeout, runner.spawn()).await;
     let mut child = match launch {
         Ok(Ok(child)) => child,
         failure => {
             // A timed-out spawn may already have created part of a containment group.
-            let _ = tokio::time::timeout(limits.timeout, runner.terminate()).await;
+            let _ = tokio::time::timeout(limits.request_timeout, runner.terminate()).await;
             return complete(
                 gate,
                 Err(if failure.is_err() {
@@ -264,9 +275,9 @@ where
         }
         _ => complete(gate, Err(Error::Transport), limits).await,
     };
-    let cleanup = tokio::time::timeout(limits.timeout, runner.terminate()).await;
+    let cleanup = tokio::time::timeout(limits.request_timeout, runner.terminate()).await;
     let _ = child.start_kill();
-    let reaped = tokio::time::timeout(limits.timeout, child.wait())
+    let reaped = tokio::time::timeout(limits.request_timeout, child.wait())
         .await
         .map_err(|_| Error::Timeout)
         .and_then(|result| result.map_err(|_| Error::Transport));

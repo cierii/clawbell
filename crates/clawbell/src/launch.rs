@@ -15,6 +15,15 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 #[derive(clap::Args)]
 pub struct Options {
+    /// Maximum idle time with no outstanding request (seconds).
+    #[arg(long, default_value_t = 600)]
+    pub idle_timeout_secs: u64,
+    /// Request/inspection/I/O deadline (seconds, at most 300).
+    #[arg(long, default_value_t = 30)]
+    pub request_timeout_secs: u64,
+    /// Absolute transport and containment lifetime (seconds, at most 86400).
+    #[arg(long, default_value_t = 3600)]
+    pub session_lifetime_secs: u64,
     /// Optional private owner IPC socket, outside all runner mounts.
     #[arg(long)]
     pub monitor_socket: Option<PathBuf>,
@@ -36,6 +45,17 @@ pub struct Options {
     /// Absolute /usr/bin executable followed by literal arguments; no shell parsing.
     #[arg(last = true, required = true)]
     pub command: Vec<String>,
+}
+impl Options {
+    pub(crate) fn limits(&self) -> std::result::Result<Limits, Error> {
+        Limits {
+            idle_timeout: std::time::Duration::from_secs(self.idle_timeout_secs),
+            request_timeout: std::time::Duration::from_secs(self.request_timeout_secs),
+            session_lifetime: std::time::Duration::from_secs(self.session_lifetime_secs),
+            ..Limits::default()
+        }
+        .validate()
+    }
 }
 /// Only these control methods have explicit launcher permission. Everything else
 /// requires a future owner policy contract and is denied at this boundary.
@@ -131,21 +151,13 @@ impl Gate for AuditGate {
 /// Validate owner input and audit launch before constructing any runner. Native
 /// preflight remains mandatory; missing delegation/isolation cannot spawn directly.
 pub async fn run(options: Options) -> Result<()> {
+    let limits = options.limits()?;
     files::trusted(&options.state_dir)?;
     files::trusted(options.policy.parent().ok_or("policy_parent_required")?)?;
     files::trusted(&options.workspace)?;
     let workspace = std::fs::canonicalize(&options.workspace)?;
     let state = std::fs::canonicalize(&options.state_dir)?;
-    if state.starts_with(&workspace)
-        || state.starts_with("/usr")
-        || state.starts_with("/etc")
-        || state.starts_with("/var")
-    {
-        return Err("state_exposed_to_runner".into());
-    }
-    if options.server.is_empty() || options.server.len() > 128 {
-        return Err("invalid_server_identity".into());
-    }
+    validate_state(&state, &workspace, &options.server)?;
     let policy_bytes = files::read(&options.policy, 1024 * 1024)?;
     let policy = Arc::new(Policy::parse(std::str::from_utf8(&policy_bytes)?)?);
     let digest = format!("{:x}", Sha256::digest(&policy_bytes));
@@ -165,7 +177,10 @@ pub async fn run(options: Options) -> Result<()> {
         executable: options.command.first().ok_or("command_required")?.clone(),
         arguments: options.command.iter().skip(1).cloned().collect(),
         cgroup_parent: options.cgroup_parent,
-        limits: ResourceLimits::default(),
+        limits: ResourceLimits {
+            lifetime: limits.session_lifetime,
+            ..ResourceLimits::default()
+        },
     };
     let mut runner = match NativeRunner::new(config) {
         Ok(r) => r,
@@ -211,7 +226,7 @@ pub async fn run(options: Options) -> Result<()> {
             tokio::io::stdout(),
             &mut gate,
             &mut runner,
-            Limits::default(),
+            limits,
         );
         tokio::pin!(session);
         tokio::select! {
@@ -225,8 +240,33 @@ pub async fn run(options: Options) -> Result<()> {
     store.record(launch, Outcome::Unknown).await?;
     match result {
         Ok(()) | Err(Error::Closed) => Ok(()),
-        Err(e) => Err(e.into()),
+        Err(e) => {
+            if e.reason() == Reason::CatalogDenied {
+                eprintln!(
+                    "catalog_review_required: stop sessions, run clawbell pins --state-dir <private-state> review, verify upstream changes, then accept the reviewed ID and reconnect"
+                );
+            }
+            Err(e.into())
+        }
     }
+}
+
+fn validate_state(
+    state: &std::path::Path,
+    workspace: &std::path::Path,
+    server: &str,
+) -> Result<()> {
+    if state.starts_with(workspace)
+        || ["/usr", "/etc", "/var"]
+            .iter()
+            .any(|p| state.starts_with(p))
+    {
+        return Err("state_exposed_to_runner".into());
+    }
+    if server.is_empty() || server.len() > 128 {
+        return Err("invalid_server_identity".into());
+    }
+    Ok(())
 }
 
 // Outer boundary records refusals from policy, pinned schemas and DLP as well as
