@@ -3,6 +3,7 @@
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 
 /// Maximum serialized arguments and policy source size.
@@ -76,6 +77,7 @@ struct CompiledRule {
 /// only after successful parsing. Existing sessions keep their old snapshot.
 pub struct Policy {
     version: String,
+    fingerprint: [u8; 32],
     tools: Vec<Tool>,
     rules: Vec<CompiledRule>,
 }
@@ -182,10 +184,16 @@ impl Policy {
             rules.push(CompiledRule { rule, regex });
         }
         Ok(Self {
+            fingerprint: Sha256::digest(source.as_bytes()).into(),
             version: config.version,
             tools: config.tools,
             rules,
         })
+    }
+    /// Digest of the exact immutable owner configuration, including same-version edits.
+    #[must_use]
+    pub fn fingerprint(&self) -> [u8; 32] {
+        self.fingerprint
     }
     /// Policy revision used to bind audit records and approval requests.
     #[must_use]

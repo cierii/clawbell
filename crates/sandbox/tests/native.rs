@@ -232,3 +232,142 @@ time.sleep(60)
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires real Linux namespace and cgroup v2 delegation"]
+async fn approved_commit_and_soul_symlink_conflict_attacks() -> Result {
+    use clawbell_core::{dlp::Vault, policy::Policy};
+    use clawbell_sandbox::transaction::{
+        Effect, Transaction, TreeLimits,
+        commit::{CommitError, RecoveryState, recovery},
+    };
+    use std::fs::File;
+    let parent = PathBuf::from(std::env::var("CLAWBELL_TEST_CGROUP")?);
+    let policy = Policy::parse(
+        "version = 'native'\n[[tools]]\nname = 'clawbell.commit'\neffect = 'write'\npaths = ['/path']\n[[rules]]\ntool = 'clawbell.commit'\ndecision = 'require_approval'\n",
+    )?;
+    let binding = commit_binding();
+    for attack in ["safe", "soul", "symlink", "host_edit"] {
+        let root = commit_fixture(attack)?;
+        let workspace = root.join("workspace");
+        let mut transaction = Transaction::prepare(
+            config(
+                workspace.clone(),
+                parent.clone(),
+                vec![
+                    "-B".into(),
+                    "-c".into(),
+                    COMMIT_ATTACK_SCRIPT.into(),
+                    attack.into(),
+                ],
+            ),
+            Effect::Write,
+            TreeLimits::default(),
+        )
+        .await?;
+        let mut child = transaction.spawn().await?;
+        let mut lines = BufReader::new(child.stdout.take().ok_or("missing stdout")?).lines();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await??
+                .as_deref(),
+            Some("done")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await??
+                .success()
+        );
+        let candidate = transaction.inspect_for_commit().await;
+        if attack == "symlink" {
+            assert!(candidate.is_err());
+        } else {
+            let reviewed = candidate?.review(
+                binding.clone(),
+                &policy,
+                &mut Vault::new(1024)?,
+                Duration::from_secs(60),
+            );
+            if attack == "soul" {
+                assert!(matches!(reviewed, Err(CommitError::Policy)));
+            } else {
+                let review = reviewed?;
+                assert!(review.preview().contains("approved"));
+                let approval = review.approve(review.digest())?;
+                if attack == "host_edit" {
+                    fs::write(workspace.join("file.txt"), "external")?;
+                }
+                let outcome = review.commit(
+                    approval,
+                    &binding,
+                    &policy,
+                    &File::open(root.join("journal"))?,
+                );
+                if attack == "host_edit" {
+                    assert_eq!(outcome, Err(CommitError::Conflict));
+                } else {
+                    outcome?;
+                    assert_eq!(fs::read(workspace.join("file.txt"))?, b"approved");
+                    assert_eq!(
+                        recovery(&File::open(root.join("journal/publication.journal"))?)?,
+                        RecoveryState::Complete
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            fs::read(workspace.join("SOUL.md"))?,
+            b"SYNTHETIC-MEMORY-CANARY"
+        );
+        if attack != "safe" {
+            assert!(!root.join("journal/publication.journal").exists());
+            assert_eq!(
+                fs::read(workspace.join("file.txt"))?,
+                if attack == "host_edit" {
+                    b"external".as_slice()
+                } else {
+                    b"old".as_slice()
+                }
+            );
+        }
+        fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+fn commit_fixture(attack: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(format!(
+            "clawbell-native-commit-{}-{attack}",
+            std::process::id()
+        ));
+    fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let workspace = root.join("workspace");
+    fs::DirBuilder::new().mode(0o700).create(&workspace)?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(root.join("journal"))?;
+    fs::write(workspace.join("file.txt"), "old")?;
+    fs::write(workspace.join("SOUL.md"), "SYNTHETIC-MEMORY-CANARY")?;
+    Ok(root)
+}
+
+const COMMIT_ATTACK_SCRIPT: &str = r"import os,sys
+open('/workspace/file.txt','w').write('approved')
+if sys.argv[1] == 'soul': open('/workspace/SOUL.md','w').write('unauthorized instructions')
+if sys.argv[1] == 'symlink':
+    os.unlink('/workspace/file.txt')
+    os.symlink('/original/SOUL.md','/workspace/file.txt')
+print('done',flush=True)
+";
+
+fn commit_binding() -> clawbell_sandbox::transaction::commit::Binding {
+    clawbell_sandbox::transaction::commit::Binding {
+        session: [1; 32],
+        server: [2; 32],
+        schema: [3; 32],
+        arguments: [4; 32],
+    }
+}

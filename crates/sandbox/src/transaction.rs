@@ -1,8 +1,11 @@
-//! One-shot staging supervisor. This module never publishes files to the host.
+//! One-shot staging supervisor with a separate explicitly approved committer.
+
 //!
 //! The trusted caller must authorize and durably audit before spawn, enforce pipe
 //! budgets, and withhold results until `Transaction::inspect` succeeds. Reports
 //! contain untrusted private paths; do not log or serialize them without redaction.
+pub mod commit;
+
 use crate::{LaunchError, Runner, linux::LinuxRunner, native::NativeConfig, sys};
 use std::{
     collections::BTreeMap,
@@ -110,10 +113,19 @@ pub struct Change {
 #[derive(PartialEq, Eq)]
 struct Node {
     mode: u32,
+    object: (u64, u64),
     data: Option<Vec<u8>>,
     attributes: Vec<u8>,
     identity: (u32, u32),
     timestamps: (i64, i64, i64, i64),
+}
+impl Drop for Node {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        if let Some(data) = &mut self.data {
+            data.zeroize();
+        }
+    }
 }
 type Tree = BTreeMap<PathBuf, Node>;
 struct Stage {
@@ -246,6 +258,7 @@ fn walk(
         relative.to_path_buf(),
         Node {
             mode: before.mode() & 0o777,
+            object: (before.dev(), before.ino()),
             attributes: fs_error(sys::staging_metadata(file))?
                 .ok_or(TransactionError::UnsupportedNode)?,
             identity: (before.uid(), before.gid()),
@@ -370,6 +383,8 @@ pub struct Transaction {
     runner: LinuxRunner,
     stage: Stage,
     baseline: Tree,
+    original: File,
+    original_baseline: Tree,
     limits: TreeLimits,
     effect: Effect,
     started: bool,
@@ -384,13 +399,16 @@ impl Transaction {
             let runner = LinuxRunner::new(config)?;
             let original = runner.workspace_handle()?;
             let stage = Stage::new(&original)?;
-            copy(&scan(&original, limits)?, &stage)?;
+            let original_baseline = scan(&original, limits)?;
+            copy(&original_baseline, &stage)?;
             let baseline = scan(&stage.directory, limits)?;
             let runner = runner.with_staging(fs_error(stage.directory.try_clone())?);
             Ok(Self {
                 runner,
                 stage,
                 baseline,
+                original,
+                original_baseline,
                 limits,
                 effect,
                 started: false,
@@ -406,6 +424,28 @@ impl Transaction {
         let child = self.runner.spawn().await?;
         self.started = true;
         Ok(child)
+    }
+    /// Stop execution and freeze a candidate for trusted owner review and publication.
+    /// The caller must keep tool results private until review/commit succeeds.
+    /// # Errors
+    /// Refuses unfinished cleanup, hidden writes, unsupported nodes and tree limits.
+    pub async fn inspect_for_commit(mut self) -> Result<commit::Candidate> {
+        self.runner.terminate().await?;
+        if !self.started {
+            return Err(TransactionError::NotStarted);
+        }
+        worker(move || {
+            let after = scan(&self.stage.directory, self.limits)?;
+            changes(&self.baseline, &after, self.effect)?;
+            Ok(commit::Candidate::new(
+                self.original,
+                self.original_baseline,
+                after,
+                self.baseline,
+                self.limits,
+            ))
+        })
+        .await
     }
     /// Consume execution, kill all descendants, confirm empty cgroup, then diff.
     /// No candidate is ever written back, even for `Effect::Write`.

@@ -28,7 +28,8 @@ Prepare an owner policy and a **credential-free** workspace containing the serve
 code. The entire selected workspace is readable by that upstream, irrespective
 of tool-argument policy: never select your home, repository containing secrets,
 `.ssh`, `.aws`, or another credential tree. All host mounts are read-only; network
-sockets and persistent host writes are unavailable in this MVP.
+sockets and persistent host writes are unavailable in the proxy launcher.
+The separate opt-in transaction library is described below.
 
 ```bash
 install -d -m 0700 "$HOME/.local/state/clawbell"
@@ -105,13 +106,37 @@ with a changed workspace returns `transaction_hidden_write`. Reports contain
 private untrusted paths, never raw content; redact them before crossing a trust
 boundary. Copying and scanning run on blocking workers, outside the packet path.
 
-This is an isolated staging/inspection API, with no host publisher or CLI write
-mode. All candidates are discarded. It is not an atomic snapshot of concurrently
-edited source files or a syscall write trace; atime-only reads are intentionally
-ignored. Failed/cancelled operations never publish. Abrupt crashes or inaccessible
-staged directories can leave private tmpfs leftovers for owner cleanup/reboot.
-See [ADR 0011](docs/adr/0011-transactional-file-staging.md) for the publication,
-approval, conflict and crash-recovery migration plan.
+For explicit owner-reviewed publication, use `inspect_for_commit` instead of
+`inspect`, then `Candidate::review` with the immutable policy, original invocation
+binding and session Vault. Display its complete redacted `preview()`, `digest()`
+and UTC `expires()` through an authenticated owner adapter. Issue `approve` only
+after the owner accepts that displayed digest; `commit` consumes both review and
+capability and rechecks current policy, context, expiry and baseline state.
+[Example policy](policies/commit-example.toml) opts into `clawbell.commit` for a
+specific path prefix; protected memory such as SOUL.md always refuses.
+
+The narrow committer replaces contents of existing UTF-8 regular files through
+verified handles. Creation/deletion, binary replacements and metadata changes
+refuse. Host edits, inode substitutions, symlinks and hardlinks invalidate consent.
+Snapshots, review and commit run outside the packet path. There is no CLI write
+mode or automatic publication from persistent MCP sessions.
+
+Provide an owner-only 0700 journal directory on persistent storage outside the
+workspace. The committer exclusively creates a private hash-only journal and
+synchronizes intent before target writes. An existing journal blocks another
+publication until the owner reviews and archives it. `commit_recovery_required`
+means files may have been partly written; `recovery` distinguishes a complete
+journal from an incomplete/unknown outcome after restart. Never retry or replay
+such an operation automatically.
+
+In-place file writes and multi-file publication are not atomic. Quiesce independent
+host writers for a coherent snapshot and commit; state checks do not supply a
+kernel CAS against same-account writers. Failed/cancelled staging never publishes;
+interrupted publication may have partial effects. Abrupt crashes can leave private
+tmpfs staging leftovers for owner cleanup/reboot. See
+[ADR 0011](docs/adr/0011-transactional-file-staging.md) for staging and
+[ADR 0012](docs/adr/0012-approved-handle-committer.md) for the approval, publication,
+concurrency and recovery contracts.
 
 ## Inspect downloaded skills before use
 

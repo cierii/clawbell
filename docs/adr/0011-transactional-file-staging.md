@@ -2,6 +2,9 @@
 
 Status: accepted for isolated staging and inspection by the owner's implementation
 request; publication remains a proposed contract, disabled in this increment.
+Follow-up: [ADR 0012](0012-approved-handle-committer.md) enables a separate
+explicitly approved handle committer and records its narrower publication and
+recovery contract. The historical staging-only decision below remains unchanged.
 
 ## Boundary and decision (recorded before implementation)
 

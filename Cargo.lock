@@ -367,9 +367,13 @@ name = "clawbell-sandbox"
 version = "0.1.0"
 dependencies = [
  "clawbell-core",
+ "getrandom 0.2.17",
  "libc",
+ "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

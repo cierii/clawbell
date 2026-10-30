@@ -18,6 +18,10 @@ pub(crate) fn high_fd(file: &File) -> io::Result<File> {
     }
     Ok(unsafe { File::from_raw_fd(fd) })
 }
+pub(crate) fn owner_uid() -> u32 {
+    // SAFETY: geteuid has no pointer arguments or preconditions.
+    unsafe { libc::geteuid() }
+}
 pub(crate) fn non_root() -> bool {
     // SAFETY: getuid/geteuid have no pointer arguments or preconditions.
     unsafe { libc::getuid() != 0 && libc::geteuid() != 0 }

@@ -1,3 +1,75 @@
+# Handoff — 2026-10-31: approved file publication and recovery
+
+Delivered the opt-in Linux transaction library committer. `inspect_for_commit`
+freezes private bytes only after complete native process cleanup. The authenticated
+owner adapter must display the complete redacted JSON-quoted replacement preview,
+its digest and expiry before issuing the opaque in-process approval. SHA-256 binds
+source/candidate state, exact policy fingerprint (including same-version edits),
+session, upstream, complete pinned tool definition, arguments, random nonce and
+UTC expiry; an independent monotonic deadline also applies. No transport approval
+or tool annotation authorizes publication. Every changed path needs an explicit
+`clawbell.commit` write-tool policy; protected memory remains denied.
+
+The narrow writer preflights the whole baseline and all target handles, then
+rechecks each pathname and retained inode before writing. It never follows a
+symlink for host publication. Durable owner-only journals contain UTC, policy,
+session, approval and path/content fingerprints, plus per-file start/fsync and
+final completion records. Existing journals block another operation. Partial,
+torn and unknown outcomes require explicit owner recovery; no automatic replay,
+rollback, journal deletion or retry was added. See ADR 0012 for the exact format,
+manual recovery procedure, concurrency contract and migration from ADR 0011.
+
+Scope: existing singly linked UTF-8 regular-file contents only. Create/delete,
+binary, type, mode, ownership and SELinux-label changes refuse. In-place writes
+are not atomic, even for one file. Independent host writers must be quiesced for
+a coherent transaction; state checks are not a kernel CAS against same-account
+writers. This is an explicit library boundary, not a new CLI write mode, UI or
+per-operation writable MCP endpoint. Existing proxy permissions remain unchanged.
+Caller adapters must authenticate the owner, supply trusted invocation digests,
+audit before untrusted execution, withhold tool results, and run review/publication
+on blocking workers. New ordinary proxy packets do no filesystem traversal.
+
+Files: transaction/commit library and native tests, policy fingerprint accessor,
+geteuid syscall adapter, README, ADR 0011 follow-up, ADR 0012, commit-example policy
+and this handoff. Direct dependencies reuse already-locked sha2/getrandom/
+serde_json/zeroize; no package versions changed. AGENTS.md is unchanged (199 lines).
+The two pre-existing untracked owner documents remain untouched and excluded.
+
+Verification:
+- MCP Context7: official rustix descriptor-relative/no-follow APIs and RustCrypto
+  sha2 incremental hashing documentation.
+- Final scripts/check-release.sh passed: locked fetch, fmt, all-target Clippy with
+  -D warnings, workspace tests, release build, CLI/default policy validation,
+  explicit policy/DLP/monitor/production-audit latency gates, memory protection,
+  delegated native containment, installer round trip, real CLI attacks and probes.
+- All 19 sandbox unit tests passed, including 11 committer tests for binding,
+  expiry, exact policy changes, foreign capabilities, protected SOUL.md with allow,
+  edited/replaced/hardlinked/symlinked files, changed parents/modes, redaction,
+  unsupported changes, write-effect validation, unsafe/colliding journals,
+  partial multi-file/interrupted-file failure and every journal truncation.
+- Real native committer test passed for safe writes, staged SOUL.md replacement,
+  symlink attack and host edits after approval. Original protected canaries stayed
+  unchanged and refusals created no publication journal or target writes.
+- Final 4,000 warmed full gate packets: p99 366.414 us, max 3.285709 ms. Native
+  transport 2,000 RTTs: max 608.172 us. Full CLI/native/audit/DLP/policy 2,000 RTTs:
+  p99 0.679 ms, max 4.317 ms. Every sample was below 5 ms. These are bounded
+  workload measurements, not a hard real-time or filesystem transaction guarantee.
+- Explicit commit-example policy check passed. Changed documentation links,
+  content/scope, diff whitespace, lockfile and final format check passed.
+- Fetched all origin refs/tags; gitleaks scanned all 14 prior commits and local
+  documentation without findings. The exact reviewed index is scanned before
+  commit. Detection is not an exhaustive proof of secret absence or fork erasure.
+- No frontend exists or changed; npm/browser checks do not apply. Tests initially
+  blocked by tool-environment tmpfs/socket restrictions were rerun outside those
+  restrictions; no product control or test was weakened.
+
+Final delivery: scan the reviewed index, perform the requested commit/push and
+verify the remote ref. GitHub Actions status is separate from local verification.
+Future per-operation MCP/owner-display integration requires its own explicit scope;
+never expose the library approve method directly to an untrusted caller.
+
+---
+
 # Handoff — 2026-10-31: transactional regular-file staging
 
 Delivered the scope in ADR 0011, written before code changes: a Linux-only,

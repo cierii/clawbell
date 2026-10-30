@@ -1,0 +1,13 @@
+# Explicit opt-in for the Linux transaction committer library, not the proxy.
+# Review every complete redacted replacement; approval never overrides deny.
+version = "commit-example-v1"
+
+[[tools]]
+name = "clawbell.commit"
+effect = "write"
+paths = ["/path"]
+
+[[rules]]
+tool = "clawbell.commit"
+decision = "require_approval"
+path_prefix = "documents"
