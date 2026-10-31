@@ -32,5 +32,7 @@ parent="/sys/fs/cgroup$relative"
 for controller in cpu memory pids; do
     [[ " $(cat "$parent/cgroup.subtree_control") " == *" $controller "* ]]
 done
-"$binary" doctor --self-test --cgroup-parent "$parent"
+systemd-run --user --quiet --wait --pipe --collect --service-type=exec -- \
+    "$binary" doctor --self-test --cgroup-parent "$parent" \
+    --report-dir "$temporary/doctor"
 printf '%s\n' 'clean_host_install_bind_restore_and_service_restart_passed'

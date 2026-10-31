@@ -172,6 +172,18 @@ PY
         self.assertIn('Restart=on-failure', unit)
         compile(INSTALLER.DELEGATE, "delegate.py", "exec")
 
+    def test_owner_manager_preserves_literal_arguments_and_failure_status(self):
+        arguments = ["/private/owner binary/clawbell", "init", "--config", "/private/client name.json"]
+        environment = {"XDG_RUNTIME_DIR": "/synthetic/runtime"}
+        with patch.object(INSTALLER, "run", return_value=b"passed") as run:
+            self.assertEqual(INSTALLER.run_owner(arguments, step="client_bind", env=environment), b"passed")
+            run.assert_called_once_with(
+                ["systemd-run", "--user", "--quiet", "--wait", "--pipe", "--collect",
+                 "--service-type=exec", "--", *arguments], step="client_bind", env=environment)
+        with patch.object(INSTALLER, "run", side_effect=INSTALLER.Refused("fixture_failed")):
+            with self.assertRaises(INSTALLER.Refused):
+                INSTALLER.run_owner(arguments, step="client_bind", env=environment)
+
     def test_pipeline_starts_user_manager_before_verify_and_never_binds_failed_probe(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -215,7 +227,11 @@ PY
             start = next(i for i, command in enumerate(commands) if command[:3] == ["sudo", "systemctl", "start"])
             verify = next(i for i, command in enumerate(commands) if command[:3] == ["systemd-analyze", "--user", "verify"])
             self.assertLess(start, verify)
-            self.assertFalse(any(len(command) > 1 and command[1] == "init" for command in commands))
+            probe = next(command for command in commands if "doctor" in command)
+            self.assertEqual(probe[:8], ["systemd-run", "--user", "--quiet", "--wait", "--pipe",
+                                         "--collect", "--service-type=exec", "--"])
+            self.assertIn("--report-dir", probe)
+            self.assertFalse(any("init" in command for command in commands))
             self.assertEqual(config.read_text(), '{"mcpServers":{}}')
 
 

@@ -100,6 +100,20 @@ def trusted(path):
             raise Refused("installer_path_refused")
 
 
+def run_owner(arguments, *, step, env):
+    """Start probes/binding inside the owner's cgroup migration boundary.
+
+    A CI/SSH caller can belong to a system service outside user@UID.service.
+    Owning the destination cgroup alone does not permit migration from there:
+    cgroups v2 also requires write access at the common ancestor. Let the user
+    manager start a transient service instead of broadening cgroup permissions.
+    Wait for its actual exit status and collect it, keeping output in our existing
+    redaction boundary. No untrusted upstream is executed by systemd-run directly.
+    """
+    return run(["systemd-run", "--user", "--quiet", "--wait", "--pipe", "--collect",
+                "--service-type=exec", "--", *arguments], step=step, env=env)
+
+
 def directory(path):
     """Create/traverse private directories using pinned no-follow directory FDs.
 
@@ -281,12 +295,13 @@ def main():
     policy = base / "policy.toml"
     exclusive(policy, (ROOT / "policies/default.toml").read_bytes())
     run([str(binary), "policy", "check", "--file", str(policy)], step="policy_check", env=environment)
-    run([str(binary), "doctor", "--self-test", "--cgroup-parent", parent], step="containment_probe", env=environment)
+    run_owner([str(binary), "doctor", "--self-test", "--cgroup-parent", parent,
+               "--report-dir", str(state / "doctor")], step="containment_probe", env=environment)
     arguments = [str(binary), "init", "--policy", str(policy), "--workspace", str(workspace),
                  "--state-dir", str(state), "--cgroup-parent", parent]
     for config in options.config:
         arguments.extend(["--config", str(config)])
-    run(arguments, step="client_bind", env=environment)
+    run_owner(arguments, step="client_bind", env=environment)
     print("installation_complete; clients_bound; policy_default_deny")
 
 

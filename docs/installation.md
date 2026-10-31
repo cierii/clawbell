@@ -53,6 +53,12 @@ workspace are translated by the existing binder. Client format limitations in
 8. Validate policy and run the real `doctor --self-test`, then invoke `init` with
    explicit paths. The configured upstream is never run during binding. The
    installed versioned executable path is embedded in the client configuration.
+   Both commands run as transient services of the owner user manager, with their
+   exit status awaited. This keeps child migration inside the owner's cgroup
+   boundary even when installation was invoked from an SSH or CI system service.
+   Ownership of a destination cgroup alone does not authorize migration from a
+   system service. No cgroup ancestor permissions are widened. The doctor report
+   is retained under the private `~/.local/state/clawbell/doctor` directory.
 
 The shell entry point validates argument shape, architecture and distribution
 before system provisioning. Python validates client paths before installing the
