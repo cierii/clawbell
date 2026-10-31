@@ -149,6 +149,22 @@ PY
             run.assert_not_called()
         self.assertEqual(output.getvalue(), "")
 
+    def test_probe_failure_emits_only_an_allowlisted_classification(self):
+        for stderr, expected in [
+            (b"host_isolation_probe_failed: synthetic-private-hint\n", "; reason=host_isolation_probe_failed"),
+            (b"synthetic-private-code: synthetic-private-hint\n", ""),
+            (b"host_permission_denied: private\nhost_io_failed: private\n", ""),
+            (b"host_permission_denied-synthetic-private: private\n", ""),
+            (None, ""),
+        ]:
+            with self.subTest(stderr=stderr), contextlib.redirect_stderr(io.StringIO()):
+                error = subprocess.CalledProcessError(1, ["fixture"], stderr=stderr)
+                with patch.object(subprocess, "run", side_effect=error):
+                    with self.assertRaises(INSTALLER.Refused) as caught:
+                        INSTALLER.run(["fixture"], step="containment_probe")
+                self.assertEqual(str(caught.exception),
+                                 "installer_step_failed; step=containment_probe; status=exit_1" + expected)
+
     def test_service_prepares_controllers_on_every_boot(self):
         unit = INSTALLER.service(Path('/private/owner% name/"delegate.py')).decode()
         self.assertIn('DelegateSubgroup=supervisor', unit)

@@ -70,6 +70,9 @@ starts. Failure reports the same stage and `status=exit_<code>`, `timeout` or
 `spawn_failed`. Arguments, owner paths, client content and captured stdout/stderr
 are never included. For example, `step=delegation_start` identifies user-service
 startup, while `step=containment_probe` identifies the mandatory native self-test.
+For that self-test only, `reason=<code>` reports a recognized, source-defined
+doctor failure classification. Child hints, paths and all other output remain
+suppressed; unknown or conflicting classifications report only the stage/status.
 A progress line is not a success acknowledgement; only `installation_complete`
 confirms the entire installation and binding sequence completed.
 

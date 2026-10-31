@@ -21,6 +21,19 @@ RUSTUP = {
     "aarch64": "e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c",
 }
 BWRAP_COMMIT = "2a76602a8c71f36c1527cf9fc3417d9149822e0c"
+# Only these source-defined doctor classifications may cross the child-output
+# boundary. Never relay an arbitrary line, hint, path or exception message.
+PROBE_FAILURE_CODES = frozenset({
+    "host_cgroup_unavailable", "host_resource_controls_unavailable",
+    "host_isolation_probe_failed", "host_isolation_probe_timeout",
+    "host_isolated_spawn_failed", "host_process_cleanup_failed",
+    "host_bubblewrap_unavailable", "host_seccomp_unavailable",
+    "host_descriptor_setup_failed", "host_workspace_refused",
+    "host_permission_denied", "host_path_not_found", "host_symlink_refused",
+    "host_storage_full", "host_filesystem_read_only", "host_io_failed",
+    "private_report_directory_required", "probe_profile_changed",
+    "containment_probe_failed", "host_fixture_changed", "audit_unavailable",
+})
 DELEGATE = '''"""Enable delegated controllers on every service start, including boot."""
 from pathlib import Path
 entries = Path('/proc/self/cgroup').read_text().splitlines()
@@ -56,7 +69,16 @@ def run(arguments, *, step="subprocess", env=None, timeout=1800):
             status = "timeout"
         else:
             status = "spawn_failed"
-        raise Refused(f"installer_step_failed; step={step}; status={status}") from error
+        detail = ""
+        if step == "containment_probe" and isinstance(error, subprocess.CalledProcessError):
+            # Compare bytes, then emit our literal classification, never child data.
+            stderr = error.stderr if isinstance(error.stderr, bytes) else b""
+            codes = {code for code in PROBE_FAILURE_CODES
+                     if any(line.startswith(code.encode() + b": ")
+                            for line in stderr.splitlines())}
+            if len(codes) == 1:
+                detail = f"; reason={next(iter(codes))}"
+        raise Refused(f"installer_step_failed; step={step}; status={status}{detail}") from error
 
 
 def trusted(path):
