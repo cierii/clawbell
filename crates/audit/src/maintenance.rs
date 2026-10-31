@@ -201,7 +201,25 @@ pub fn rotate(directory: &Path) -> Result<(String, String), AuditError> {
     let mode: String = connection
         .query_row("PRAGMA journal_mode", [], |r| r.get(0))
         .map_err(|_| AuditError)?;
-    if mode != "delete" {
+    if mode == "wal" {
+        // Cooperative writers/followers are stopped by the exclusive lease.
+        // Copying only the main file is safe after all WAL frames are durable
+        // there and SQLite itself has switched back to rollback journaling.
+        let (busy, _, _): (u32, i32, i32) = connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|_| AuditError)?;
+        if busy != 0 {
+            return Err(AuditError);
+        }
+        let switched: String = connection
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .map_err(|_| AuditError)?;
+        if switched != "delete" {
+            return Err(AuditError);
+        }
+    } else if mode != "delete" {
         return Err(AuditError);
     }
     let tx = connection
@@ -371,6 +389,9 @@ mod tests {
             connection.execute_batch("INSERT INTO synthetic_fill VALUES(zeroblob(4096));")?;
         }
         assert_eq!(status(&dir)?.warning_level, 3);
+        // These large fixture transactions test the database page quota, not
+        // pinned-reader WAL growth (covered separately by the writer tests).
+        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         assert!(store.record(0, Outcome::Intent).await.is_err());
         store.record(intent, Outcome::Unknown).await?;
         connection.execute_batch("DROP TABLE synthetic_fill; VACUUM;")?;

@@ -1,3 +1,46 @@
+# Handoff — 2026-10-31: durable disk audit latency
+
+The owner supplied the actual Actions failure: 4000 production gate packets,
+p95 1.286 ms, p99 2.916 ms, maximum 5.888 ms; the strict 5 ms maximum failed.
+Local DELETE journaling also failed on persistent btrfs (max 11.013 ms).
+The previous local temporary audit fixtures used /tmp (tmpfs), so those results
+did not certify persistent-disk latency; historical evaluation documentation now
+states this explicitly. New reports identify audit_filesystem separately from
+their output directory filesystem.
+
+OperationStore now uses WAL with FULL synchronous commits, unchanged per-event
+acknowledgement and no relaxed budget. IMMEDIATE transactions serialize WAL-size
+admission across sessions. Automatic checkpoints and separate 8/16 MiB admission
+thresholds bound pinned-reader growth while reserving terminal-event capacity.
+Existing sidecars must be private regular single-link files. Offline rotation
+requires successful checkpoint and transition to DELETE before copying the main
+database; busy storage refuses. ADR 0018 records migration and recovery limits.
+No dependencies, schemas, authorization rules or AGENTS.md changes were needed.
+
+Verification:
+- check-release.sh passed: locked fetch, fmt, Clippy/-D warnings, workspace tests,
+  release build/CLI smoke, HTTP consent/deadlines, every packet budget, real native
+  isolation/attack/lifecycle/skills/broker/transaction/diagnostic gates.
+- Separate final disk gate, TMPDIR=target/ci-latency-before on btrfs: 4000 packets,
+  p95 1.088 ms, nearest-rank p99 1.887 ms, maximum 4.091 ms; every sample <5 ms.
+  It ran after other I/O-heavy tests finished. Exploratory runs during concurrent
+  work also exceeded 5 ms; WAL is not a hard real-time guarantee on shared hosts.
+- Default temporary-fixture full native CLI maximum 0.827 ms; tmpfs gate maximum
+  0.380 ms. These are distinct from the persistent-disk gate above.
+- Audit regressions cover FULL/WAL settings, private sidecars, unsafe-file refusal,
+  forced process death with flushed uncommitted WAL, archive recovery of the
+  acknowledged intent without replay, pinned readers, both WAL admission limits,
+  terminal reserve, no append on refusal and existing rotation/page-quota behavior.
+- MCP Context7: official SQLite WAL, FULL synchronization, checkpoint and journal
+  limit documentation. Historical reports are preserved rather than rewritten.
+
+Remote Actions remain unverified because GitHub API/connector access returns 404.
+Push the reviewed commit to main and inspect the next hosted checks/native jobs;
+do not move existing tags. Native AArch64/clean Ubuntu provisioning were not run
+locally. The pre-existing untracked owner documents remain untouched/excluded.
+
+---
+
 # Handoff — 2026-10-31: clean-host CI user-bus regression
 
 The disposable installer gate now exports the owner's XDG_RUNTIME_DIR and

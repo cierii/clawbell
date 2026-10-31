@@ -525,6 +525,14 @@ automatic deletion/retention. Store audit/baselines in an
 existing private 0700 directory outside workspace/system runtime mounts, with
 trusted ancestors; files are 0600. See [ADR 0006](docs/adr/0006-mvp-installer-and-audit.md).
 
+The operation audit uses WAL with `synchronous=FULL`: every event commits before
+acknowledgement. Automatic checkpoints recycle the WAL; a pinned reader causing
+8 MiB of growth stops new sessions/intents, with terminal-event reserve until
+16 MiB. Stop sessions/readers and resolve storage pressure before reconnecting.
+Keep SQLite sidecars with the database; never delete live WAL/SHM files manually.
+Offline rotation checkpoints and switches to DELETE before archiving. See
+[ADR 0018](docs/adr/0018-durable-wal-audit.md) for migration and durability limits.
+
 The native runner isolates user/PID/mount/network/IPC/UTS namespaces, drops
 capabilities, clears inherited environment and exposes only read-only runtime and
 workspace plus private temporary storage. Seccomp and cgroups bound the whole

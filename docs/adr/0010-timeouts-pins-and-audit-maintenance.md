@@ -88,6 +88,10 @@ file. VACUUM reclaims freed pages after commit. Archives retain append-only trig
 all correlation/session records and unresolved intents; they are never replayed.
 Correlation IDs in an archive belong to that database generation, not future events.
 
+[ADR 0018](0018-durable-wal-audit.md) extends this procedure for FULL-synchronous
+WAL writers: offline rotation must successfully checkpoint and transition to DELETE
+before the archive transaction. The archive/retention contract remains unchanged.
+
 A copy/transaction failure retains the original events. A crash before commit can
 leave an extra full or partial archive; an archive without an active rotation receipt
 is not evidence that retention committed. A crash after commit but before VACUUM

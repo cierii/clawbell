@@ -14,6 +14,13 @@ regenerates a report from the exact tagged checkout on each Linux architecture;
 packaging rejects a different commit, source fingerprint, binary or architecture.
 Local documentation results are not substituted for that tagged evidence.
 
+These are historical measurements before [ADR 0018](adr/0018-durable-wal-audit.md).
+The current operation writer uses FULL-synchronous WAL. Also, the historical
+report's filesystem field describes its output directory; temporary audit fixtures
+may reside on a different filesystem, including tmpfs. Those values must not be
+interpreted as persistent-disk audit certification. New timing evidence must
+identify the actual audit-fixture filesystem and retain every measured outlier.
+
 ## Permitted workflow completion and DLP false alarms
 
 The real MCP fixture completed **2,200/2,200 allowed read calls (100%)**, with the

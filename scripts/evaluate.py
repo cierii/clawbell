@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import platform
 import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 PREFIX = "CLAWBELL_EVALUATION="
@@ -82,7 +83,9 @@ def main():
         "binary_sha256": hashlib.sha256((ROOT / "target/release/clawbell").read_bytes()).hexdigest(),
         "environment": {"os": platform.system(), "kernel": platform.release(), "architecture": platform.machine(),
                         "rust": subprocess.check_output(["rustc", "--version"]).decode().strip(),
-                        "filesystem": subprocess.check_output(["stat", "-f", "--format=%T", str(logs)]).decode().strip()},
+                        "filesystem": subprocess.check_output(["stat", "-f", "--format=%T", str(logs)]).decode().strip(),
+                        "audit_filesystem": subprocess.check_output(
+                            ["stat", "-f", "--format=%T", tempfile.gettempdir()]).decode().strip()},
         "metrics": metrics,
         "limitations": [
             "Synthetic deterministic read-tool corpus, not representative field completion or DLP incidence.",

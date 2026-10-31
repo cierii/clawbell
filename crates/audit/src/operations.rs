@@ -197,13 +197,22 @@ impl OperationStore {
                 let Ok(_lock) = crate::storage::lock(&directory, "operations.lock", false) else {
                     let _ = ready.send(Err(AuditError)); return;
                 };
-                let Ok(connection) = open(&directory) else {
+                let Ok(mut connection) = open(&directory) else {
                     let _ = ready.send(Err(AuditError));
                     return;
                 };
-                let session = connection.query_row(
-                    "INSERT INTO sessions_v1(policy_sha256,upstream_sha256) VALUES(?1,?2) RETURNING id",
-                    params![policy_digest, upstream_digest], |row| row.get::<_, String>(0));
+                let session = (|| {
+                    let tx = connection
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                        .map_err(|_| AuditError)?;
+                    wal_budget(&directory, Outcome::Intent)?;
+                    let session = tx.query_row(
+                        "INSERT INTO sessions_v1(policy_sha256,upstream_sha256) VALUES(?1,?2) RETURNING id",
+                        params![policy_digest, upstream_digest], |row| row.get::<_, String>(0))
+                        .map_err(|_| AuditError)?;
+                    tx.commit().map_err(|_| AuditError)?;
+                    Ok::<_, AuditError>(session)
+                })();
                 let Ok(session) = session else {
                     let _ = ready.send(Err(AuditError));
                     return;
@@ -215,7 +224,8 @@ impl OperationStore {
                 while let Some(write) = receiver.blocking_recv() {
                     warn_capacity(&connection, &mut warned);
                     let result = append(
-                        &connection,
+                        &mut connection,
+                        &directory,
                         &policy_digest,
                         &write,
                         &session,
@@ -282,13 +292,29 @@ impl OperationStore {
 fn open(directory: &Path) -> Result<Connection, AuditError> {
     let _file =
         crate::storage::private(directory, "operations.sqlite3", true).map_err(|_| AuditError)?;
+    // Existing sidecars may contain committed or recovery state. Validate them
+    // without creating, truncating or removing them; SQLite owns their lifecycle.
+    for name in [
+        "operations.sqlite3-journal",
+        "operations.sqlite3-wal",
+        "operations.sqlite3-shm",
+    ] {
+        match crate::storage::private(directory, name, false) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(AuditError),
+        }
+    }
     let path = directory.join("operations.sqlite3");
     let mut connection = Connection::open(path).map_err(|_| AuditError)?;
     connection
         .busy_timeout(std::time::Duration::from_millis(100))
         .map_err(|_| AuditError)?;
     warn_capacity(&connection, &mut 0);
-    connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=16384;
+    // FULL synchronizes the WAL on every commit before acknowledgement. Reuse
+    // avoids rollback journal creation and multiple syncs per packet. Automatic
+    // checkpoints plus append's hard growth limits bound stalled-reader storage.
+    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=1048576; PRAGMA max_page_count=16384;
         CREATE TABLE IF NOT EXISTS events_v1 (
             id INTEGER PRIMARY KEY, correlation INTEGER NOT NULL,
             utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -348,22 +374,50 @@ fn open(directory: &Path) -> Result<Connection, AuditError> {
     CREATE TRIGGER IF NOT EXISTS migrations_no_update BEFORE UPDATE ON operation_migrations_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;
     CREATE TRIGGER IF NOT EXISTS migrations_no_delete BEFORE DELETE ON operation_migrations_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;").map_err(|_| AuditError)?;
     tx.commit().map_err(|_| AuditError)?;
+    let mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(|_| AuditError)?;
+    let synchronous: u32 = connection
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(|_| AuditError)?;
+    if mode != "wal" || synchronous != 2 {
+        return Err(AuditError);
+    }
     Ok(connection)
 }
+fn wal_budget(directory: &Path, outcome: Outcome) -> Result<(), AuditError> {
+    // journal_size_limit bounds recycled WALs, not growth while a reader pins
+    // an old snapshot. Reserve half the hard budget for terminal audit events.
+    let wal =
+        std::fs::metadata(directory.join("operations.sqlite3-wal")).map_err(|_| AuditError)?;
+    if wal.len() >= 16 * 1024 * 1024
+        || (matches!(outcome, Outcome::Intent) && wal.len() >= 8 * 1024 * 1024)
+    {
+        return Err(AuditError);
+    }
+    Ok(())
+}
 fn append(
-    connection: &Connection,
+    connection: &mut Connection,
+    directory: &Path,
     policy: &str,
     write: &Write,
     session: &str,
     upstream: &str,
 ) -> Result<i64, AuditError> {
-    let pages: u32 = connection
+    // Serialize admission and insertion across session writers, so a second
+    // writer cannot grow the WAL between the size check and this transaction.
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| AuditError)?;
+    wal_budget(directory, write.outcome)?;
+    let pages: u32 = tx
         .query_row("PRAGMA page_count", [], |r| r.get(0))
         .map_err(|_| AuditError)?;
     if matches!(write.outcome, Outcome::Intent) && pages >= crate::maintenance::PAGE_LIMIT - 32 {
         return Err(AuditError);
     }
-    let inserted = connection
+    let inserted = tx
         .execute(
             "INSERT INTO events_v1(correlation,policy_sha256,outcome,reason,session_id,upstream_sha256,binding_sha256)
              SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE ?1=0 OR EXISTS (
@@ -375,7 +429,9 @@ fn append(
     if inserted != 1 {
         return Err(AuditError);
     }
-    Ok(connection.last_insert_rowid())
+    let id = tx.last_insert_rowid();
+    tx.commit().map_err(|_| AuditError)?;
+    Ok(id)
 }
 
 fn warn_capacity(connection: &Connection, warned: &mut u8) {
@@ -415,6 +471,199 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn wal_keeps_full_sync_private_storage_and_bounded_retention() -> Result {
+        let dir = Directory::new()?;
+        let connection = open(&dir.0)?;
+        assert_eq!(
+            connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
+            "wal"
+        );
+        assert_eq!(
+            connection.query_row("PRAGMA synchronous", [], |row| row.get::<_, u32>(0))?,
+            2
+        );
+        assert_eq!(
+            connection.query_row("PRAGMA journal_size_limit", [], |row| row.get::<_, u32>(0))?,
+            1_048_576
+        );
+        assert_eq!(
+            connection.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, u32>(0))?,
+            256
+        );
+        let journal = std::fs::metadata(dir.0.join("operations.sqlite3-wal"))?;
+        assert_eq!(journal.permissions().mode() & 0o777, 0o600);
+        assert!(journal.len() > 0 && journal.len() <= 1_048_576);
+        let shared = std::fs::metadata(dir.0.join("operations.sqlite3-shm"))?;
+        assert_eq!(shared.permissions().mode() & 0o777, 0o600);
+        // WAL mode survives reconnects; maintenance must checkpoint before copy.
+        let reader = Connection::open(dir.0.join("operations.sqlite3"))?;
+        assert_eq!(
+            reader.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))?,
+            "wal"
+        );
+        Ok(())
+    }
+    #[test]
+    fn unsafe_audit_sidecars_refuse_before_modifying_the_target() -> Result {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            for mode in ["symlink", "hardlink", "permissions"] {
+                let dir = Directory::new()?;
+                let target = dir.0.join("synthetic-owner-file");
+                std::fs::write(&target, b"synthetic-private-fixture")?;
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+                let journal = dir.0.join(format!("operations.sqlite3{suffix}"));
+                match mode {
+                    "symlink" => std::os::unix::fs::symlink(&target, &journal)?,
+                    "hardlink" => std::fs::hard_link(&target, &journal)?,
+                    _ => {
+                        std::fs::rename(&target, &journal)?;
+                        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o644))?;
+                    }
+                }
+                assert!(open(&dir.0).is_err(), "{mode} must refuse");
+                assert_eq!(
+                    std::fs::read(if mode == "permissions" {
+                        &journal
+                    } else {
+                        &target
+                    })?,
+                    b"synthetic-private-fixture"
+                );
+            }
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn pinned_reader_wal_growth_refuses_intents_and_reserves_terminal_events() -> Result {
+        let dir = Directory::new()?;
+        let store = OperationStore::open(&dir.0, "a".repeat(64)).await?;
+        let reader = Connection::open(dir.0.join("operations.sqlite3"))?;
+        reader.execute_batch("BEGIN; SELECT count(*) FROM events_v1;")?;
+        let mut last = None;
+        let mut refused = false;
+        for _ in 0..4000 {
+            if let Ok(id) = store.record(0, Outcome::Intent).await {
+                last = Some(id);
+            } else {
+                refused = true;
+                break;
+            }
+        }
+        assert!(
+            refused,
+            "a pinned reader must not permit unbounded WAL growth"
+        );
+        let before = std::fs::metadata(dir.0.join("operations.sqlite3-wal"))?.len();
+        assert!((8 * 1024 * 1024..9 * 1024 * 1024).contains(&before));
+        assert!(store.record(0, Outcome::Intent).await.is_err());
+        assert_eq!(
+            std::fs::metadata(dir.0.join("operations.sqlite3-wal"))?.len(),
+            before,
+            "a refused intent must not append an event"
+        );
+        store
+            .record(last.ok_or("no_intent")?, Outcome::Unknown)
+            .await?;
+        for _ in 0..4000 {
+            if store.record(0, Outcome::Denied).await.is_err() {
+                break;
+            }
+        }
+        let full = std::fs::metadata(dir.0.join("operations.sqlite3-wal"))?.len();
+        assert!((16 * 1024 * 1024..17 * 1024 * 1024).contains(&full));
+        assert!(store.record(0, Outcome::Denied).await.is_err());
+        assert_eq!(
+            std::fs::metadata(dir.0.join("operations.sqlite3-wal"))?.len(),
+            full
+        );
+        reader.execute_batch("ROLLBACK")?;
+        // Explicitly release pinned history. In production, stop sessions so
+        // SQLite's last-connection cleanup checkpoints before reopening them.
+        reader.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        drop(reader);
+        store.record(0, Outcome::Intent).await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn wal_recovers_after_process_death_without_replaying_intents() -> Result {
+        use std::io::Write as _;
+        use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+        const CHILD: &str = "CLAWBELL_AUDIT_CRASH_FIXTURE";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            let directory = std::path::PathBuf::from(directory);
+            let store = OperationStore::open(&directory, "a".repeat(64)).await?;
+            // This acknowledgement must survive even an immediate process kill.
+            store.record(0, Outcome::Intent).await?;
+            let mut connection = open(&directory)?;
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "INSERT INTO events_v1(correlation,policy_sha256,outcome) VALUES(0,'synthetic-uncommitted','deny')",
+                [],
+            )?;
+            // Force uncommitted pages to the WAL without a commit marker.
+            transaction.cache_flush()?;
+            println!("synthetic_uncommitted_wal_ready");
+            std::io::stdout().flush()?;
+            // Only the parent kills this fixture; it never commits the transaction.
+            loop {
+                std::thread::park();
+            }
+        }
+        let dir = Directory::new()?;
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "operations::tests::wal_recovers_after_process_death_without_replaying_intents",
+                "--nocapture",
+            ])
+            .env(CHILD, &dir.0)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let output = child.stdout.take().ok_or("missing_fixture_stdout")?;
+        let mut lines = BufReader::new(output).lines();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(line) = lines.next_line().await? {
+                if line == "synthetic_uncommitted_wal_ready" {
+                    return Ok::<_, std::io::Error>(());
+                }
+            }
+            Err(std::io::Error::other("crash_fixture_not_ready"))
+        })
+        .await??;
+        child.kill().await?;
+        child.wait().await?;
+        // A killed writer leaves committed data in the WAL. Rotation must
+        // recover/checkpoint it before copying only the main database file.
+        let (archive, _) = crate::maintenance::rotate(&dir.0)?;
+        let recovered = Connection::open(dir.0.join(archive))?;
+        assert_eq!(
+            recovered.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?,
+            "ok"
+        );
+        assert_eq!(
+            recovered.query_row("SELECT count(*) FROM events_v1", [], |row| row
+                .get::<_, u32>(0))?,
+            1
+        );
+        assert_eq!(
+            recovered.query_row("SELECT outcome FROM events_v1", [], |row| row
+                .get::<_, String>(0))?,
+            "allow_intent"
+        );
+        // Archived unfinished intents are never replayed into the active file.
+        let _reopened = OperationStore::open(&dir.0, "a".repeat(64)).await?;
+        let active = Connection::open(dir.0.join("operations.sqlite3"))?;
+        assert_eq!(
+            active.query_row("SELECT count(*) FROM events_v1", [], |row| row
+                .get::<_, u32>(0))?,
+            0
+        );
+        Ok(())
     }
     #[tokio::test]
     async fn durable_correlations_payload_free_append_only_and_reopen() -> Result {
