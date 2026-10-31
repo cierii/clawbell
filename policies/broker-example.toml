@@ -1,0 +1,16 @@
+# Owner-reviewed named HTTP capability; no implicit tool or skill execution grants.
+version = "sandbox-broker-example-v1"
+tools = []
+rules = []
+
+[skills]
+allow_execution = false
+allow_shell = false
+
+[[network]]
+name = "public-status"
+url = "https://api.example.com/public/status"
+method = "GET"
+decision = "allow"
+# Private destinations require one explicit private_ip for this exact URL.
+# Metadata and link-local destinations remain forbidden even with an exception.

@@ -55,6 +55,8 @@ jobs:
         run: bash scripts/check-local.sh
       - name: Production gate packet budget (includes durable audit)
         run: cargo test --locked --release -p clawbell complete_mvp_gate_packets_under_five_ms -- --ignored --nocapture
+      - name: Broker packet budget (policy, DLP, durable audit and loopback)
+        run: cargo test --locked --release -p clawbell-proxy broker_packets_under_five_ms -- --ignored --nocapture
       - name: Install pinned SBOM generator
         run: cargo install cargo-cyclonedx --version 0.5.9 --locked
       - name: Package Linux MVP

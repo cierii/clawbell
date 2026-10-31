@@ -3,15 +3,27 @@
 use crate::{Direction, Envelope, Error, Gate, Reason};
 use clawbell_core::dlp::Vault;
 use serde_json::Value;
+/// One host-owned session vault shared by MCP and its sandbox broker. Sharing
+/// prevents an unlabelled secret learned on one channel escaping on another.
+pub type SharedVault = std::sync::Arc<tokio::sync::Mutex<Vault>>;
+/// Construct a session-scoped shared DLP vault.
+/// # Errors
+/// Refuses invalid limits or unavailable entropy.
+pub fn shared_vault(limit: usize) -> Result<SharedVault, Error> {
+    Ok(std::sync::Arc::new(tokio::sync::Mutex::new(
+        Vault::new(limit).map_err(|_| Error::Denied)?,
+    )))
+}
 
 /// Per-session DLP. Owner-supplied tool names authorize token resolution only
 /// inside tools/call arguments. Never reuse across upstreams or sessions.
 pub struct LocalVaultGate<G> {
     inner: G,
-    vault: Option<Vault>,
+    vault: Option<SharedVault>,
     tools: Vec<String>,
     limit: usize,
     remote: bool,
+    credentials: Option<crate::oauth::Credentials>,
 }
 impl<G: Gate> LocalVaultGate<G> {
     /// Construct for one local upstream, with an explicit restoration allowlist.
@@ -22,11 +34,24 @@ impl<G: Gate> LocalVaultGate<G> {
     pub fn new(inner: G, tools: Vec<String>, limit: usize) -> Result<Self, Error> {
         Ok(Self {
             inner,
-            vault: Some(Vault::new(limit).map_err(|_| Error::Refused(Reason::DlpDenied))?),
+            vault: Some(shared_vault(limit)?),
             tools,
             limit,
             remote: false,
+            credentials: None,
         })
+    }
+    /// Share this session's vault with the host broker; never reuse across sessions.
+    #[must_use]
+    pub fn with_vault(mut self, vault: SharedVault) -> Self {
+        self.vault = Some(vault);
+        self
+    }
+    /// Observe host credential rotation before every DLP inspection.
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: crate::oauth::Credentials) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
     /// Build a remote DLP boundary with no secret-restoration capability. Register
     /// an adapter-held OAuth credential before inspecting any upstream output.
@@ -44,8 +69,10 @@ impl<G: Gate> LocalVaultGate<G> {
         if let Some(bearer) = bearer {
             result
                 .vault
-                .as_mut()
+                .as_ref()
                 .ok_or(Error::Denied)?
+                .try_lock()
+                .map_err(|_| Error::Denied)?
                 .register(bearer.value())
                 .map_err(|_| Error::Refused(Reason::DlpDenied))?;
         }
@@ -183,7 +210,7 @@ fn inspect_text_units(vault: &mut Vault, value: &Value) -> Result<(), Error> {
     Ok(())
 }
 
-fn transform(
+pub(crate) fn transform(
     value: &mut Value,
     f: &mut impl FnMut(&str) -> Result<String, Error>,
 ) -> Result<(), Error> {
@@ -275,12 +302,18 @@ impl<G: Gate> Gate for LocalVaultGate<G> {
         direction: Direction,
         message: &Envelope,
     ) -> Result<Envelope, Error> {
-        let vault = self
+        let shared = self
             .vault
-            .as_mut()
-            .ok_or(Error::Refused(Reason::DlpDenied))?;
+            .as_ref()
+            .ok_or(Error::Refused(Reason::DlpDenied))?
+            .clone();
+        let mut vault = shared.lock().await;
+        if let Some(credentials) = &self.credentials {
+            credentials.register(&mut vault)?;
+        }
         if direction == Direction::Server {
-            let redacted = inspect_server_message(vault, message, self.limit)?;
+            let redacted = inspect_server_message(&mut vault, message, self.limit)?;
+            drop(vault);
             return self.inner.inspect(direction, &redacted).await;
         }
         let mut checked = message.value().clone();
@@ -290,7 +323,9 @@ impl<G: Gate> Gate for LocalVaultGate<G> {
                 .map_err(|_| Error::Refused(Reason::DlpDenied))?;
             Ok(s.to_owned())
         })?;
+        drop(vault);
         let approved = self.inner.inspect(direction, message).await?;
+        let mut vault = shared.lock().await;
         let mut value = approved.value().clone();
         let has_tokens = approved.encode()?.windows(10).any(|w| w == b"[clawbell:");
         if has_tokens {
@@ -391,6 +426,8 @@ mod tests {
                 gate.vault
                     .as_mut()
                     .ok_or(Error::Refused(Reason::DlpDenied))?
+                    .lock()
+                    .await
                     .register(&literal.to_string())?;
                 for (direction, value) in [
                     (
@@ -488,6 +525,8 @@ mod tests {
             gate.vault
                 .as_mut()
                 .ok_or(Error::Denied)?
+                .lock()
+                .await
                 .register("123456789")?;
             let value = json!({"jsonrpc":"2.0","id":1,"result":{"content":content}});
             assert!(
@@ -501,6 +540,8 @@ mod tests {
         gate.vault
             .as_mut()
             .ok_or(Error::Denied)?
+            .lock()
+            .await
             .register("123456789")?;
         let value = json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"separate-a":"1234","separate-b":"56789"}}});
         assert_eq!(

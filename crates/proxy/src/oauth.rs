@@ -1,6 +1,8 @@
-//! Pre-registered OAuth authorization-code flow with S256 PKCE and resource
-//! indicators. Owner-configured HTTPS endpoints replace unsafe automatic trust in
-//! WWW-Authenticate URLs, dynamic registration or unauthenticated discovery.
+//! OAuth authorization code with S256 PKCE and resource indicators. Discovery
+//! narrows an explicit owner issuer grant; registration, refresh and private host
+//! persistence never grant authority to server-supplied URLs.
+pub use crate::oauth_discovery::Discovery;
+pub use crate::oauth_session::{Credentials, Persist, TokenSession, Tokens};
 use crate::{
     Error, Limits,
     network::{Bearer, Endpoint},
@@ -74,6 +76,7 @@ impl Authorization {
         let client = BasicClient::new(ClientId::new(client_id.to_owned()))
             .set_auth_uri(AuthUrl::new(authorization_url.to_owned()).map_err(|_| Error::Denied)?)
             .set_token_uri(TokenUrl::new(token_url.to_owned()).map_err(|_| Error::Denied)?)
+            .set_auth_type(oauth2::AuthType::RequestBody)
             .set_redirect_uri(RedirectUrl::new(redirect.to_owned()).map_err(|_| Error::Denied)?);
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
         let mut request = client
@@ -110,6 +113,19 @@ impl Authorization {
         returned_state: &str,
         limits: Limits,
     ) -> Result<Bearer, Error> {
+        self.complete_tokens(code, returned_state, limits)
+            .await?
+            .bearer()
+    }
+    /// Redeem once, retaining an optional refresh credential for host-only storage.
+    /// # Errors
+    /// Applies the same state, PKCE, lifetime and token validation as complete.
+    pub async fn complete_tokens(
+        self,
+        code: Zeroizing<String>,
+        returned_state: &str,
+        limits: Limits,
+    ) -> Result<Tokens, Error> {
         if returned_state.len() > 256
             || Instant::now() >= self.deadline
             || self.state != CsrfToken::new(returned_state.to_owned())
@@ -146,11 +162,12 @@ impl Authorization {
         if result.token_type() != &BasicTokenType::Bearer {
             return Err(Error::Denied);
         }
-        Bearer::new(
-            result.access_token().secret().to_owned().into(),
-            result.expires_in().ok_or(Error::Denied)?,
+        Tokens::from_response(
+            &result,
+            self.resource,
+            self.client.client_id().as_str().to_owned(),
+            None,
         )
-        .map(|b| b.with_audience(self.resource))
     }
 }
 

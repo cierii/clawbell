@@ -1,7 +1,7 @@
 # clawbell
 
 A local Rust MCP firewall with a reversible client installer, scan-bound skill
-runner and explicit remote HTTP relay. Linux launches **local stdio servers** through policy checks,
+runner and pinned remote HTTP relay. Linux launches **local stdio servers** through policy checks,
 pinned tool schemas, session DLP, durable SQLite audit and native containment.
 It runs without cloud telemetry. It is a conservative security boundary, not a
 claim to recognize every malicious instruction or arbitrary encoded secret.
@@ -27,8 +27,9 @@ launch. macOS and Windows execution are unsupported; macOS remains fail-closed.
 Prepare an owner policy and a **credential-free** workspace containing the server
 code. The entire selected workspace is readable by that upstream, irrespective
 of tool-argument policy: never select your home, repository containing secrets,
-`.ssh`, `.aws`, or another credential tree. All host mounts are read-only; network
+`.ssh`, `.aws`, or another credential tree. All host mounts are read-only; direct network
 sockets and persistent host writes are unavailable in the proxy launcher.
+Named host broker capabilities are described below.
 The explicit `proxy-transaction` mode and transaction library are described below.
 
 ```bash
@@ -50,16 +51,19 @@ Discovery checks only known locations, never recursively scans your disk:
 
 Use repeated `--config /absolute/file.json` for other locations. Supported files
 are strict JSON with one `mcpServers` or VS Code `servers` map. Unknown surrounding
-settings are preserved. Every entry must be local stdio, with an absolute
-`/usr/bin/` executable and literal string arguments. URLs, `envFile`, `cwd`,
-nonempty `env`, JSONC, duplicate keys and ambiguous formats refuse the whole file.
-PATH resolution, package installation and remote HTTP binding are not supported.
+settings are preserved. Local entries require an absolute `/usr/bin/` executable
+and literal string arguments. Remote entries accept only a credential-free HTTPS `url`, optional
+`type: "http"` or `"streamable-http"`, and optional public `clawbellOAuth`
+settings described below. Remote preflight checks pinned egress without issuing
+MCP requests; local entries still exercise native isolation. `envFile`, `cwd`,
+nonempty `env`, remote headers, JSONC, duplicate keys and ambiguous formats refuse
+the whole file. PATH resolution and package installation are not supported.
 Complete path arguments inside the selected workspace translate to `/workspace`;
 embedded paths such as `--file=/host/path` need explicit sandbox-compatible values.
 
 Before changing any selected configuration, `init` validates every server and
-exercises native isolation with a fixed trusted probe. It never executes an
-upstream for discovery. Per-server output contains only indices and a fixed
+exercises native isolation for local entries with a fixed trusted probe. It never
+executes an upstream for discovery. Per-server output contains only indices and a fixed
 preflight status; missing host prerequisites leave configs/backups untouched.
 Launch repeats isolation checks. See [ADR 0008](docs/adr/0008-fragments-audit-and-binding-preflight.md).
 
@@ -222,8 +226,8 @@ grants execution permission; skills outside the controlled runner are unprotecte
 ## Remote Streamable HTTP and protocol operations
 
 Remote upstreams run on their own hosts; clawbell controls traffic, not their
-process isolation. Start a separate owner-authorized session manually (the
-installer still handles only local stdio):
+process isolation. Start a separate owner-authorized session manually, or use `init` to wrap
+credential-free HTTPS entries in supported client configurations:
 
 ```bash
 clawbell proxy-http --url https://mcp.example.com/mcp \
@@ -236,7 +240,8 @@ verifies TLS and the connected peer, and refuses every redirect or automatic ret
 No ambient proxy, cookies or credentials from the sandbox are used. An exact
 `--private-ip` exception is available for one address at that URL/port; plain HTTP
 is restricted to explicit loopback and cannot carry OAuth credentials. The sandbox
-itself remains disconnected; this is not a general forward proxy for skill code.
+itself remains disconnected. Local processes can use only the named capabilities
+described in the sandbox broker section below.
 
 For a pre-registered OAuth public client, add the following flags to proxy-http:
 
@@ -247,36 +252,138 @@ For a pre-registered OAuth public client, add the following flags to proxy-http:
 ```
 
 Open the login URL printed to stderr. The provider must accept loopback ephemeral
-callback ports. PKCE S256, one-use state, a five-minute login deadline and an exact
-resource indicator bind the exchange. Token requests use pinned egress; access
-tokens stay in host memory and are registered with DLP before responses are shown.
-The bearer expires monotonically and is injected only at the exact HTTPS resource.
-No credentials are printed to stdout, placed in CLI arguments or saved to disk.
-No discovery, dynamic registration, refresh or automatic replay after 401 exists;
-expired tokens require a new explicit login/session.
+callback ports. PKCE S256, one-use state, a five-minute deadline and an exact
+resource indicator bind the exchange. Every token request uses pinned egress.
+Access and refresh credentials, including rotations, are registered with DLP
+before any corresponding MCP output is disclosed. Runtime expiry is monotonic;
+a received 401 never replays an MCP request or starts an unattended login.
 
-JSON responses, accepted notifications, POST SSE without waiting for EOF and
-session IDs are supported. Wrong IDs, session changes and reverse requests refuse.
-GET streams, SSE resume/replay and session DELETE are not implemented. Servers
-requiring those optional facilities are unsupported.
+To discover endpoints, explicitly authorize one HTTPS issuer instead of supplying
+authorization/token URLs:
+
+```bash
+--oauth-login --oauth-issuer https://issuer.example.com/ \
+--oauth-client-id public-client-id --oauth-persist --oauth-scope mcp
+```
+
+Discovery checks RFC 9728 resource metadata and RFC 8414 issuer metadata, exact
+resource/issuer identity, S256 and authorization-code support. Discovered endpoints
+must remain on the trusted issuer origin; redirects, private destinations and
+untrusted WWW-Authenticate URLs cannot expand that grant. For explicit dynamic
+public-client registration, replace `--oauth-client-id` with `--oauth-register`.
+Registration requires the explicit login action and never accepts client secrets
+or registration-management tokens. Providers requiring those are unsupported.
+
+`--oauth-persist` opts into synchronized **0600** token files inside the private
+**0700** host state directory. These files contain credentials: protect the directory
+and its backups; they are never sandbox-mounted or copied into client configurations.
+On reconnect, use the same settings/scopes and omit `--oauth-login` and
+`--oauth-register`. Configuration, discovered endpoint or resource changes refuse
+cached credentials. Without persistence, credentials remain in host memory.
+A session-long exclusive lease prevents concurrent refresh consumers. Before a
+refresh grant, the cache receives a durable tombstone; uncertain grants are never
+retried automatically. After a crash, stop all matching sessions, remove only the
+matching stale `oauth-<binding>.lease` after owner review, and explicitly log in
+again if its token file is empty. Refresh/storage failures close the session.
+
+The binder automatically wraps mixed local stdio and remote HTTPS entries. A
+remote entry may include owner-defined public settings:
+
+```json
+{
+  "url": "https://mcp.example.com/mcp",
+  "type": "http",
+  "clawbellOAuth": {
+    "issuer": "https://issuer.example.com/",
+    "client_id": "public-client-id",
+    "scopes": ["mcp"]
+  }
+}
+```
+
+The generated stdio wrapper uses `proxy-http`, the exact endpoint, private state
+and deterministic monitor socket; backups/receipts keep their existing reversible
+contract. OAuth bindings add persistence, issuer and public client/scopes, without
+starting registration or login. Before opening the client, run the generated
+command/arguments in a terminal with `--oauth-login` once to populate its exact
+cache. For a dynamically registered client omit `client_id` from the settings and
+add `--oauth-register` to that first terminal invocation. Tokens and confidential
+client options are never accepted in binding metadata.
+
+JSON responses, accepted notifications, POST SSE and session IDs are supported.
+After the initialized acknowledgement, an independent GET stream can receive
+notifications through the same protocol/policy/DLP gate. An explicit 405 disables
+this optional stream. Completed SSE IDs enable up to three GET resumptions; a
+disconnected POST stream resumes with GET and never repeats POST. IDs are scoped
+to that stream/session; partial events remain undisclosed. Duplicate IDs, wrong
+response IDs and interactive reverse requests refuse. Shutdown attempts one scoped DELETE, accepting
+an empty 200/204 or unsupported 405. Missing sessions are not silently recreated.
+Network/session cleanup cannot undo remote effects.
 
 [protocol-example.toml](policies/protocol-example.toml) shows separate resources
 and prompts permissions. resources/read and prompts/get match an exact URI/name;
 a listing or URI template never grants retrieval permission. Lists are pinned
 before publication. Prompt arguments must match the pinned definition; resource
 contents must carry the requested URI. Text-only DLP remains mandatory. Resource
-subscriptions, list-change notifications, binary content and pagination of these
-two metadata catalogs currently refuse. Protocol `require_approval` suspends the
-exact validated request for one owner decision through the connected monitor,
+subscriptions, list-change notifications and binary content still refuse.
+Protocol `require_approval` suspends the exact validated request for one owner decision through the connected monitor,
 including lists, resource reads and prompt retrieval. A separate deny still wins;
 prompt arguments and catalog pins must pass before asking for approval.
 
-Tool catalogs support nextCursor across at most 64 pages, 4096 tools and 8 MiB in
-total, with the existing per-message limit. No call runs before the full catalog,
-schemas and aggregate pin pass. Each exposed page also needs an owner-reviewed
+Tools, resources, resource templates and prompts support nextCursor across at
+most 64 pages, 4096 entries and 8 MiB per catalog, with the existing per-message
+limit. Only the immediately preceding opaque cursor can continue an enumeration;
+overlapping requests and non-string/oversized cursors refuse. A fresh prompt
+listing immediately invalidates its old definitions, and prompt execution waits
+for all pages and the aggregate pin. Nonpaginated content pins remain compatible;
+paginated content uses page scopes 0–63 and aggregate scope 64.
+
+For tools, no call runs before the full catalog, schemas and aggregate pin pass. Each exposed page also needs an owner-reviewed
 pin: first discovery may require successive review/reconnect cycles for pages and
 the aggregate. Changed page partitioning may require review. Repeated/wrong
 cursors, duplicate names, empty nonterminal pages and exhausted bounds refuse.
+
+## Sandbox network broker (Linux)
+
+Ordinary local MCP processes and scan-bound skills launched by `proxy` can request
+named HTTP exceptions from the immutable owner policy. See
+[broker-example.toml](policies/broker-example.toml). No grant means no broker
+descriptor or additional capability. Transactional publication mode does not gain
+a broker implicitly.
+
+```toml
+[[network]]
+name = "public-status"
+url = "https://api.example.com/public/status"
+method = "GET"
+decision = "allow"
+```
+
+Each grant binds one exact scheme, destination, port, path and GET/POST method.
+Only an exact `private_ip` can permit a private target; metadata/link-local
+destinations always refuse. Denied entries perform no DNS lookup; duplicate names,
+unknown fields and unsupported approval/method values refuse policy load.
+DNS is pinned before sandbox execution, TLS is verified, and redirects refuse.
+
+The sandbox receives one already-connected channel at fd 3, identified by
+`CLAWBELL_BROKER_FD=3`. Both sides exchange bounded UTF-8 JSONL:
+
+```json
+{"endpoint":"public-status","body":""}
+{"status":200,"body":"public status"}
+```
+
+Requests cannot supply URLs, methods, headers, authentication or CONNECT tunnels.
+GET bodies must be empty; POST sends UTF-8 text/plain. Responses accept only UTF-8
+text/plain or application/json, returning the inspected body as text. Binary data,
+unknown formats, partial/oversized frames and schema-changing request redaction
+refuse. Every operation has a deadline and a durable intent before network I/O.
+The broker shares the MCP session DLP vault, so a learned secret cannot escape
+through the other channel. Denial/failure closes the channel and terminates the
+associated sandbox tree; an unfinished intent has unknown outcome and never replays.
+The network namespace remains disconnected and seccomp still denies all socket
+constructors. This channel is a capability for that process and its descendants,
+not an HTTP proxy environment variable or a host filesystem socket mount.
 
 ## Execute a reviewed skill snapshot (Linux)
 
@@ -528,7 +635,8 @@ Technical contracts: [rmcp](https://github.com/modelcontextprotocol/rust-sdk),
 [MCP transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
 [bubblewrap](https://github.com/containers/bubblewrap),
 [ADR 0003](docs/adr/0003-policy-baseline-memory.md),
-[ADR 0005](docs/adr/0005-owner-ipc-approvals.md).
+[ADR 0005](docs/adr/0005-owner-ipc-approvals.md),
+[ADR 0016](docs/adr/0016-sandbox-broker-and-stateful-http-oauth.md).
 
 ## Host diagnostics and approval monitor
 

@@ -45,3 +45,7 @@ id_ed25519
 *.bak
 *.clawbell.json
 *.clawbell-*.tmp
+
+# Host-only OAuth credentials and crash leases
+oauth-*.json
+oauth-*.lease

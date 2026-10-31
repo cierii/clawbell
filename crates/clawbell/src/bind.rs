@@ -44,8 +44,33 @@ fn digest(bytes: &[u8]) -> String {
 fn text(path: &Path) -> Result<&str> {
     path.to_str().ok_or_else(|| Code("non_utf8_path").into())
 }
-fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8>> {
-    let mut config: Value = clawbell_core::json::parse(original)?;
+fn remote_url(entry: &serde_json::Map<String, Value>) -> Result<String> {
+    if entry
+        .keys()
+        .any(|k| !["url", "type", "clawbellOAuth"].contains(&k.as_str()))
+        || entry
+            .get("type")
+            .is_some_and(|v| !matches!(v.as_str(), Some("http" | "streamable-http")))
+    {
+        return Err(Code("unsupported_remote_options").into());
+    }
+    let url = reqwest::Url::parse(
+        entry
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or(Code("remote_url_required"))?,
+    )?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(Code("credential_free_https_required").into());
+    }
+    Ok(url.to_string())
+}
+fn server_map(config: &mut Value) -> Result<&mut serde_json::Map<String, Value>> {
     let object = config
         .as_object_mut()
         .ok_or(Code("configuration_object_required"))?;
@@ -65,8 +90,109 @@ fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8
     if servers.is_empty() || servers.len() > 256 {
         return Err(Code("invalid_server_count").into());
     }
+    Ok(servers)
+}
+fn remote_oauth(entry: &serde_json::Map<String, Value>) -> Result<Vec<String>> {
+    let Some(value) = entry.get("clawbellOAuth") else {
+        return Ok(Vec::new());
+    };
+    let config = value.as_object().ok_or(Code("invalid_oauth_binding"))?;
+    if config
+        .keys()
+        .any(|k| !["issuer", "client_id", "scopes"].contains(&k.as_str()))
+    {
+        return Err(Code("invalid_oauth_binding").into());
+    }
+    let issuer = reqwest::Url::parse(
+        config
+            .get("issuer")
+            .and_then(Value::as_str)
+            .ok_or(Code("invalid_oauth_binding"))?,
+    )?;
+    if issuer.scheme() != "https"
+        || !issuer.username().is_empty()
+        || issuer.password().is_some()
+        || issuer.query().is_some()
+        || issuer.fragment().is_some()
+    {
+        return Err(Code("invalid_oauth_binding").into());
+    }
+    let mut args = vec![
+        "--oauth-issuer".into(),
+        issuer.to_string(),
+        "--oauth-persist".into(),
+    ];
+    if let Some(client) = config.get("client_id") {
+        let client = client
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 1024 && !s.chars().any(char::is_control))
+            .ok_or(Code("invalid_oauth_binding"))?;
+        args.extend(["--oauth-client-id".into(), client.to_owned()]);
+    }
+    if let Some(scopes) = config.get("scopes") {
+        let scopes = scopes
+            .as_array()
+            .filter(|s| s.len() <= 32)
+            .ok_or(Code("invalid_oauth_binding"))?;
+        for scope in scopes {
+            let scope = scope
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+                .ok_or(Code("invalid_oauth_binding"))?;
+            args.extend(["--oauth-scope".into(), scope.to_owned()]);
+        }
+    }
+    Ok(args)
+}
+fn wrap_remote(
+    entry: &mut serde_json::Map<String, Value>,
+    name: &str,
+    settings: &Settings,
+    scope: &str,
+) -> Result<()> {
+    let url = remote_url(entry)?;
+    let server_id = format!("{}:{name}", &scope[..16]);
+    if server_id.len() > 128 {
+        return Err(Code("server_identity_limit").into());
+    }
+    let socket_key = digest(format!("{scope}:{name}").as_bytes());
+    let socket = settings
+        .state_dir
+        .join(format!("monitor-{}.sock", &socket_key[..24]));
+    if text(&socket)?.len() > 107 {
+        return Err(Code("monitor_socket_path_limit").into());
+    }
+    let mut args: Vec<String> = [
+        "proxy-http",
+        "--url",
+        &url,
+        "--policy",
+        text(&settings.policy)?,
+        "--state-dir",
+        text(&settings.state_dir)?,
+        "--server",
+        &server_id,
+        "--monitor-socket",
+        text(&socket)?,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    args.extend(remote_oauth(entry)?);
+    *entry = serde_json::from_value(
+        json!({"type":"stdio","command":text(&settings.binary)?,"args":args}),
+    )?;
+    Ok(())
+}
+fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8>> {
+    let mut config: Value = clawbell_core::json::parse(original)?;
+    let servers = server_map(&mut config)?;
     for (name, server) in servers {
         let entry = server.as_object_mut().ok_or(Code("invalid_server"))?;
+        if entry.contains_key("url") {
+            wrap_remote(entry, name, settings, scope)?;
+            continue;
+        }
         let command = entry
             .get("command")
             .and_then(Value::as_str)
@@ -181,6 +307,25 @@ pub async fn preflight(path: &Path, settings: &Settings, index: usize) -> Result
         .and_then(Value::as_object)
         .ok_or(Code("invalid_server_map"))?;
     for (server_index, server) in servers.values().enumerate() {
+        if let Some(entry) = server.as_object().filter(|e| e.contains_key("url")) {
+            let url = remote_url(entry)?;
+            let result = clawbell_proxy::network::Endpoint::connect(
+                &url,
+                None,
+                clawbell_proxy::Limits::default(),
+            )
+            .await;
+            println!(
+                "configuration_{index}_server_{server_index}: {}",
+                if result.is_ok() {
+                    "preflight_passed"
+                } else {
+                    "preflight_denied"
+                }
+            );
+            result?;
+            continue;
+        }
         let result = clawbell_sandbox::native::NativeRunner::preflight(
             clawbell_sandbox::native::NativeConfig {
                 workspace: settings.workspace.clone(),

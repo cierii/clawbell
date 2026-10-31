@@ -1,3 +1,89 @@
+# Handoff — 2026-10-31: sandbox broker, complete catalogs and HTTP/OAuth lifecycle
+
+## Delivered
+
+Owner policy now supports named exact GET/POST broker capabilities. Ordinary MCP
+and scan-bound skill runners inherit one connected fd 3 without enabling socket
+creation, host network access or writes. Broker operations use pinned DNS/TLS,
+complete text/structural JSON DLP, shared MCP vault knowledge, durable intent and
+bounded response publication. Direct sockets, unknown destinations, raw known
+secrets and unsupported formats fail closed. Transaction mode gains no network
+capability. Existing ordinary-profile doctor evidence refuses the broker profile.
+
+Resources, resource templates and prompts support bounded exact-cursor enumeration
+with per-page and aggregate pins, duplicate/repeated/overlapping-page refusal and
+no stale prompt execution while refreshing. Existing nonpaginated pins are retained.
+
+Streamable HTTP adds independent GET, bounded SSE resumption via GET only, strict
+stream/session event IDs and a single scoped DELETE on shutdown. The initialized
+202 barrier remains mandatory. No effectful POST or MCP operation is replayed.
+Interactive reverse capabilities still refuse.
+
+OAuth supports explicit trusted-issuer discovery, explicit public-client dynamic
+registration, serialized refresh/rotation and opt-in private persistent tokens.
+All access/refresh generations are registered with host DLP before publication.
+Atomic 0600 storage in 0700 state uses a session-long lease and a durable tombstone
+before refresh; uncertain grants never replay. Runtime expiry is monotonic.
+Cached records bind owner configuration, resource, scopes and discovered endpoints.
+Records contain plaintext credentials protected by host filesystem permissions;
+the runtime never exposes them to client JSON, sandbox mounts, logs or Git.
+
+Init reversibly wraps mixed local stdio/remote HTTPS configurations. Optional
+clawbellOAuth carries only issuer/public client/scopes. First login/registration
+is an explicit terminal action using the generated wrapper identity. Existing
+bindings require unbind, owner backup archival and rebind; no silent migration.
+README, broker example policy and ADR 0016 document scope, migration and limits.
+AGENTS.md stays unchanged at 199 lines; dependencies and lockfile are unchanged.
+The two pre-existing untracked owner documents remain untouched and excluded.
+
+## Verification
+
+Context7 official rmcp GET/session/resumption, oauth2 refresh/custom HTTP and
+reqwest DNS/redirect/proxy/deadline contracts consulted, with pinned source checks.
+Actual bubblewrap 0.12.0 source and native tests confirm fd inheritance and closure
+in supervisor/PID 1 without changing seccomp.
+
+The full scripts/check-release.sh pipeline passed: locked fetch, formatting,
+all-target Clippy with warnings denied, workspace/doc tests, release build, CLI
+help/policy checks, remote monitor consent/EOF/deadline integration, all latency
+gates, actual Linux containment, installer/skills/broker/transactional CLI attacks,
+memory isolation, doctor and demo. Final workspace tests and Clippy also cover the
+last structural JSON DLP, discovery metadata and SSE compatibility changes.
+The broker example policy validates. Python AST, shell syntax, documentation
+local links and staged whitespace/scope checks pass. No UI manifests exist;
+npm/browser checks are not applicable.
+
+Latest measurements: complete production gate p99 346.256 us/max 465.622 us per
+packet; remote resource gate p99 282.385 us/max 749.691 us. Broker with policy,
+structural DLP, durable audit and loopback: 2000 warmed packets, p99 438.531 us,
+max 937.116 us. Native transport max 448.620 us; complete CLI/native/audit/DLP
+2000 RTTs p99 0.728 ms/max 1.676 ms. Every measured warmed packet/RTT stays below
+5 ms; startup, large messages, human waits, network/issuer latency and arbitrary
+host/storage contention remain outside this reproducible budget. Transaction
+snapshot/execution/approval/publication is separate from packet overhead.
+
+Checksum-verified Gitleaks 8.30.1 scanned all 19 fetched existing commits and the
+exact reviewed index with no findings. Runtime data, token stores/leases and
+installer backups remain ignored. The two original untracked owner documents
+are not staged. The final index is rescanned after this verification note.
+
+## Operational limits and next step
+
+Only Linux enforces local execution; other platforms remain fail closed. Broker
+bodies are bounded UTF-8 text/plain or JSON responses; no binary/CONNECT/arbitrary
+headers or credentials from sandbox data. Network capability applies to the process
+and descendants, not to a particular tool call. Heuristics cannot recognize every
+encoded or constructed secret. No frontend manifests exist, so UI/npm checks do
+not apply.
+
+Discovery cannot expand beyond an explicitly trusted issuer origin; private or
+off-origin discovery targets and confidential/managed clients refuse. Live external
+provider conformance is not certified by synthetic tests. Token-store crash leases
+require explicit owner cleanup after matching sessions stop; a tombstone requires
+fresh explicit login. Session loss does not imply remote rollback or automatic
+reinitialization. Local results do not certify GitHub Actions or AArch64 execution;
+check the workflow associated with the pushed commit separately.
+
 # Handoff — 2026-10-31: diagnostic evidence, HTTP monitoring and live audit
 
 ## Delivered

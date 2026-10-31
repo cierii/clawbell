@@ -49,6 +49,8 @@ struct Config {
     protocol: Vec<ProtocolRule>,
     #[serde(default)]
     skills: SkillGrants,
+    #[serde(default)]
+    network: Vec<NetworkGrant>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,6 +113,23 @@ struct ProtocolRule {
     target: Option<String>,
     decision: Decision,
 }
+/// One named HTTP capability for a sandbox broker, supplied only by the owner.
+/// Exact URLs bind scheme, destination, port and path; sandbox data selects only
+/// the name. No prefix, wildcard or redirect authorization is implied.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkGrant {
+    /// Unique session-local capability name.
+    pub name: String,
+    /// Exact credential-free destination.
+    pub url: String,
+    /// GET or POST. Other methods are refused at policy load.
+    pub method: String,
+    /// Explicit decision; interactive consent is not supported by this channel.
+    pub decision: Decision,
+    /// Exact private destination IP exception, scoped to this URL.
+    pub private_ip: Option<std::net::IpAddr>,
+}
 struct CompiledRule {
     rule: Rule,
     regex: Option<Regex>,
@@ -124,6 +143,7 @@ pub struct Policy {
     rules: Vec<CompiledRule>,
     protocol: Vec<ProtocolRule>,
     skills: SkillGrants,
+    network: Vec<NetworkGrant>,
 }
 /// Normalize an owner-relative POSIX path without resolving untrusted symlinks.
 /// Absolute paths, parent traversal and platform-dependent separators are refused.
@@ -202,6 +222,25 @@ impl Policy {
                 return Err(PolicyError);
             }
         }
+        let mut network_names = std::collections::HashSet::new();
+        if config.network.len() > 32 {
+            return Err(PolicyError);
+        }
+        for grant in &config.network {
+            if grant.name.is_empty()
+                || grant.name.len() > 128
+                || !grant
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                || !network_names.insert(&grant.name)
+                || grant.url.len() > 4096
+                || !matches!(grant.method.as_str(), "GET" | "POST")
+                || grant.decision == Decision::RequireApproval
+            {
+                return Err(PolicyError);
+            }
+        }
         let mut names = std::collections::HashSet::new();
         for tool in &config.tools {
             if tool.name.is_empty()
@@ -250,7 +289,13 @@ impl Policy {
             rules,
             protocol: config.protocol,
             skills: config.skills,
+            network: config.network,
         })
+    }
+    /// Named broker capabilities from this immutable policy snapshot.
+    #[must_use]
+    pub fn network_grants(&self) -> &[NetworkGrant] {
+        &self.network
     }
     /// Capture explicit skill and shell grants with this exact policy snapshot.
     #[must_use]

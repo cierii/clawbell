@@ -6,6 +6,7 @@ mod evidence;
 mod files;
 mod launch;
 mod manage;
+mod oauth_store;
 mod remote;
 mod scan;
 #[cfg(target_os = "linux")]

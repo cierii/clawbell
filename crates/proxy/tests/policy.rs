@@ -893,6 +893,7 @@ async fn next_approval(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Exercise all exact one-use consent outcomes in one matrix.
 async fn protocol_approvals_are_exact_one_use_and_denial_never_forwards() -> Result {
     use clawbell_proxy::monitor::{Command, Event, Monitor, frame};
     use tokio::{
@@ -956,6 +957,22 @@ async fn protocol_approvals_are_exact_one_use_and_denial_never_forwards() -> Res
             assert_eq!(result.is_ok(), allow);
             assert_eq!(calls.load(Ordering::Relaxed), usize::from(allow));
             if allow {
+                if matches!(method, "resources/list" | "prompts/list") {
+                    // Finish the first enumeration before starting another;
+                    // overlapping catalog requests now correctly refuse.
+                    gate.inspect(
+                        Direction::Server,
+                        &parse(
+                            &json!({
+                                "jsonrpc":"2.0", "id":2,
+                                "error":{"code":-32603,"message":"synthetic enumeration failure"}
+                            }),
+                            Direction::Server,
+                        )?,
+                    )
+                    .await?;
+                    calls.store(1, Ordering::Relaxed);
+                }
                 // The old answer cannot authorize another request, even identical params.
                 let again = parse(
                     &json!({"jsonrpc":"2.0","id":3,"method":method,"params":params}),
@@ -1023,6 +1040,128 @@ async fn protocol_approval_without_owner_and_explicit_deny_never_forward() -> Re
             }
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the shared three-catalog adversarial matrix together.
+async fn every_content_catalog_requires_exact_cursor_complete_pins_and_unique_entries() -> Result {
+    use clawbell_core::signatures::{argument_digest, scoped_catalog_identity};
+    for (method, field, key) in [
+        ("resources/list", "resources", "uri"),
+        (
+            "resources/templates/list",
+            "resourceTemplates",
+            "uriTemplate",
+        ),
+        ("prompts/list", "prompts", "name"),
+    ] {
+        let directory = Directory::new()?;
+        let store = BaselineStore::open(&directory.0).await?;
+        let snapshot = Arc::new(Policy::parse(&format!(
+            "version='pages'\ntools=[]\nrules=[]\n[[protocol]]\nmethod='{method}'\ndecision='allow'\n[[protocol]]\nmethod='prompts/get'\ntarget='second'\ndecision='allow'\n"
+        ))?);
+        let entries = [
+            json!({key:"first","name":"first"}),
+            json!({key:"second","name":"second"}),
+        ];
+        let pins: Vec<_> = entries.iter().map(|e| Ok(json!({"name":argument_digest(&json!({"key": e[key]}))?,"inputSchema":{},"metadata":e}))).collect::<std::result::Result<_, Box<dyn std::error::Error + Send + Sync>>>()?;
+        for (index, slice) in [(0, &pins[..1]), (1, &pins[1..]), (64, &pins[..])] {
+            accept_catalog_pin(
+                &store,
+                &scoped_catalog_identity("content-pages", method, index)?,
+                slice,
+            )
+            .await?;
+        }
+        for attack in [
+            "valid",
+            "forged",
+            "duplicate",
+            "repeat",
+            "overlap",
+            "empty",
+            "early-prompt",
+        ] {
+            let mut gate = PolicyGate::new(
+                FixtureGate {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                },
+                snapshot.clone(),
+                store.clone(),
+                "content-pages".into(),
+            )?;
+            let list = |id, cursor: Option<&str>| {
+                parse(
+                    &json!({"jsonrpc":"2.0","id":id,"method":method,"params":cursor.map_or_else(||json!({}), |c|json!({"cursor":c}))}),
+                    Direction::Client,
+                )
+            };
+            gate.inspect(Direction::Client, &list(1, None)?).await?;
+            if attack == "overlap" {
+                assert!(
+                    gate.inspect(Direction::Client, &list(2, None)?)
+                        .await
+                        .is_err()
+                );
+                continue;
+            }
+            let result = json!({"jsonrpc":"2.0","id":1,"result":{field: if attack == "empty" { vec![] } else { vec![entries[0].clone()] }, "nextCursor":"opaque"}});
+            let first = gate
+                .inspect(Direction::Server, &parse(&result, Direction::Server)?)
+                .await;
+            if attack == "empty" {
+                assert!(first.is_err());
+                continue;
+            }
+            first?;
+            if attack == "early-prompt" {
+                if method == "prompts/list" {
+                    let get = parse(
+                        &json!({"jsonrpc":"2.0","id":9,"method":"prompts/get","params":{"name":"first"}}),
+                        Direction::Client,
+                    )?;
+                    assert!(gate.inspect(Direction::Client, &get).await.is_err());
+                }
+                continue;
+            }
+            let continuation = gate
+                .inspect(
+                    Direction::Client,
+                    &list(
+                        2,
+                        Some(if attack == "forged" {
+                            "forged"
+                        } else {
+                            "opaque"
+                        }),
+                    )?,
+                )
+                .await;
+            if attack == "forged" {
+                assert!(continuation.is_err());
+                continue;
+            }
+            continuation?;
+            let mut result = json!({field:[entries[usize::from(attack != "duplicate")].clone()]});
+            if attack == "repeat" {
+                result["nextCursor"] = json!("opaque");
+            }
+            let response = parse(
+                &json!({"jsonrpc":"2.0","id":2,"result":result}),
+                Direction::Server,
+            )?;
+            let result = gate.inspect(Direction::Server, &response).await;
+            if attack == "valid" {
+                result?;
+                if method == "prompts/list" {
+                    gate.inspect(Direction::Client, &parse(&json!({"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"second"}}), Direction::Client)?).await?;
+                }
+            } else {
+                assert!(result.is_err());
+            }
+        }
     }
     Ok(())
 }

@@ -1,6 +1,7 @@
 //! Reviewed syscall boundary: no allocation/locks in the post-fork callback.
 //! All descriptors are owned and live until spawn completes. Sources are duplicated
-//! above fd 9 to avoid collisions with stdio and destination descriptors 3, 4 and optional staging 5.
+//! above fd 9 to avoid collisions with stdio and destination descriptors 3–6.
+//! Broker profiles reserve fd 3 and shift workspace/filter/staging by one.
 #![allow(unsafe_code)]
 use std::{
     fs::File,
@@ -40,6 +41,7 @@ pub(crate) fn setup(
     filter: File,
     membership: File,
     staging: Option<File>,
+    broker: Option<File>,
 ) {
     // SAFETY: callback uses only async-signal-safe syscalls, no heap allocation or
     // Rust locks. Captured descriptors cannot alias destinations (all >= 10).
@@ -47,15 +49,21 @@ pub(crate) fn setup(
         command.pre_exec(move || {
             // CLOEXEC preserves Rust's exec-error pipe while ensuring arbitrary
             // caller-owned descriptors cannot leak across the sandbox boundary.
+            let shift = i32::from(broker.is_some());
             if libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, 4_u32) != 0
                 || libc::write(membership.as_raw_fd(), b"0".as_ptr().cast(), 1) != 1
-                || libc::dup2(workspace.as_raw_fd(), 3) < 0
-                || libc::dup2(filter.as_raw_fd(), 4) < 0
+                || libc::dup2(workspace.as_raw_fd(), 3 + shift) < 0
+                || libc::dup2(filter.as_raw_fd(), 4 + shift) < 0
             {
                 return Err(io::Error::last_os_error());
             }
             if let Some(ref staging) = staging
-                && libc::dup2(staging.as_raw_fd(), 5) < 0
+                && libc::dup2(staging.as_raw_fd(), 5 + shift) < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if let Some(ref broker) = broker
+                && libc::dup2(broker.as_raw_fd(), 3) < 0
             {
                 return Err(io::Error::last_os_error());
             }

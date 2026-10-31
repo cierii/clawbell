@@ -54,6 +54,7 @@ pub struct LinuxRunner {
     config: NativeConfig,
     workspace: File,
     staging: Option<File>,
+    broker: Option<File>,
     group: Arc<Group>,
     watchdog: Option<JoinHandle<()>>,
     started: bool,
@@ -137,6 +138,7 @@ impl LinuxRunner {
                 config,
                 workspace,
                 staging: None,
+                broker: None,
                 group: Arc::new(Group { directory, kill }),
                 watchdog: None,
                 started: false,
@@ -149,29 +151,14 @@ impl LinuxRunner {
     }
 }
 impl LinuxRunner {
-    pub(crate) fn workspace_handle(&self) -> Result<File, LaunchError> {
-        self.workspace
-            .try_clone()
-            .map_err(|_| LaunchError::DescriptorUnavailable)
-    }
-    pub(crate) fn with_staging(mut self, staging: File) -> Self {
-        self.staging = Some(staging);
+    /// Attach one connected host broker capability as fd 3. The runner never
+    /// receives a listener, network socket constructor or host credentials.
+    #[must_use]
+    pub fn with_broker(mut self, stream: std::os::unix::net::UnixStream) -> Self {
+        self.broker = Some(std::os::fd::OwnedFd::from(stream).into());
         self
     }
-}
-impl Runner for LinuxRunner {
-    #[allow(clippy::unused_async_trait_impl)] // Spawn must execute only when the future is polled.
-    async fn spawn(&mut self) -> Result<Child, LaunchError> {
-        if self.started {
-            return Err(LaunchError::AlreadyStarted);
-        }
-        self.started = true;
-        let membership = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(self.group.directory.join("cgroup.procs"))
-            .map_err(|_| LaunchError::ResourceControlsUnavailable)?;
-        let filter = seccomp::filter()?;
+    fn command(&self) -> std::process::Command {
         let mut command = std::process::Command::new("/usr/bin/bwrap");
         command
             .env_clear()
@@ -197,6 +184,9 @@ impl Runner for LinuxRunner {
                 command.args(["--ro-bind", path, path]);
             }
         }
+        if self.broker.is_some() {
+            command.args(["--setenv", "CLAWBELL_BROKER_FD", "3"]);
+        }
         command.args([
             "--proc",
             "/proc",
@@ -215,7 +205,7 @@ impl Runner for LinuxRunner {
             "PATH",
             "/usr/bin",
             "--ro-bind-fd",
-            "3",
+            if self.broker.is_some() { "4" } else { "3" },
             if self.staging.is_some() {
                 "/original"
             } else {
@@ -223,18 +213,59 @@ impl Runner for LinuxRunner {
             },
         ]);
         if self.staging.is_some() {
-            command.args(["--bind-fd", "5", "/workspace"]);
+            command.args([
+                "--bind-fd",
+                if self.broker.is_some() { "6" } else { "5" },
+                "/workspace",
+            ]);
         }
         command
-            .args(["--chdir", "/workspace", "--seccomp", "4", "--"])
+            .args([
+                "--chdir",
+                "/workspace",
+                "--seccomp",
+                if self.broker.is_some() { "5" } else { "4" },
+                "--",
+            ])
             .arg(&self.config.executable)
             .args(&self.config.arguments);
+        command
+    }
+    pub(crate) fn workspace_handle(&self) -> Result<File, LaunchError> {
+        self.workspace
+            .try_clone()
+            .map_err(|_| LaunchError::DescriptorUnavailable)
+    }
+    pub(crate) fn with_staging(mut self, staging: File) -> Self {
+        self.staging = Some(staging);
+        self
+    }
+}
+impl Runner for LinuxRunner {
+    #[allow(clippy::unused_async_trait_impl)] // Spawn must execute only when the future is polled.
+    async fn spawn(&mut self) -> Result<Child, LaunchError> {
+        if self.started {
+            return Err(LaunchError::AlreadyStarted);
+        }
+        self.started = true;
+        let membership = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(self.group.directory.join("cgroup.procs"))
+            .map_err(|_| LaunchError::ResourceControlsUnavailable)?;
+        let filter = seccomp::filter()?;
+        let mut command = self.command();
         sys::setup(
             &mut command,
             sys::high_fd(&self.workspace).map_err(|_| LaunchError::DescriptorUnavailable)?,
             sys::high_fd(&filter).map_err(|_| LaunchError::DescriptorUnavailable)?,
             sys::high_fd(&membership).map_err(|_| LaunchError::DescriptorUnavailable)?,
             self.staging
+                .as_ref()
+                .map(sys::high_fd)
+                .transpose()
+                .map_err(|_| LaunchError::DescriptorUnavailable)?,
+            self.broker
                 .as_ref()
                 .map(sys::high_fd)
                 .transpose()
@@ -250,6 +281,7 @@ impl Runner for LinuxRunner {
                     LaunchError::SpawnFailed
                 }
             })?;
+        self.broker = None;
         let group = Arc::clone(&self.group);
         let lifetime = self.config.limits.lifetime;
         self.watchdog = Some(tokio::spawn(async move {

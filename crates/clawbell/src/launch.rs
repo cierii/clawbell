@@ -230,6 +230,45 @@ pub(crate) fn monitor_endpoint(
 }
 /// Validate owner input and audit launch before constructing any runner. Native
 /// preflight remains mandatory; missing delegation/isolation cannot spawn directly.
+#[cfg(target_os = "linux")]
+async fn prepare_broker(
+    mut runner: LaunchRunner,
+    policy: &Policy,
+    store: OperationStore,
+    limits: Limits,
+    shared_vault: clawbell_proxy::dlp::SharedVault,
+) -> Result<(
+    LaunchRunner,
+    Option<(clawbell_proxy::broker::Broker, tokio::net::UnixStream)>,
+)> {
+    let broker = if policy
+        .network_grants()
+        .iter()
+        .any(|g| g.decision == clawbell_core::policy::Decision::Allow)
+    {
+        let broker = clawbell_proxy::broker::Broker::prepare(policy, store.clone(), limits)
+            .await?
+            .with_vault(shared_vault.clone());
+        let (host, child) = std::os::unix::net::UnixStream::pair()?;
+        host.set_nonblocking(true)?;
+        runner = match runner {
+            LaunchRunner::Native(r) => LaunchRunner::Native(r.with_broker(child)),
+            LaunchRunner::Skill(r) => LaunchRunner::Skill(r.with_broker(child)),
+        };
+        Some((broker, tokio::net::UnixStream::from_std(host)?))
+    } else {
+        None
+    };
+    Ok((runner, broker))
+}
+async fn serve_broker(
+    broker: Option<(clawbell_proxy::broker::Broker, tokio::net::UnixStream)>,
+) -> std::result::Result<(), Error> {
+    if let Some((broker, stream)) = broker {
+        return broker.serve(stream).await;
+    }
+    std::future::pending().await
+}
 pub async fn run(options: Options) -> Result<()> {
     let limits = options.limits()?;
     validate_owner_paths(&options)?;
@@ -239,6 +278,9 @@ pub async fn run(options: Options) -> Result<()> {
     let evidence = options.containment_evidence(limits, &workspace)?;
     let policy_bytes = files::read(&options.policy, 1024 * 1024)?;
     let policy = Arc::new(Policy::parse(std::str::from_utf8(&policy_bytes)?)?);
+    if evidence.is_some() && !policy.network_grants().is_empty() {
+        return Err(Code("doctor_profile_mode_mismatch").into());
+    }
     let digest = format!("{:x}", Sha256::digest(&policy_bytes));
     let identity = format!(
         "{:x}",
@@ -274,6 +316,7 @@ pub async fn run(options: Options) -> Result<()> {
     let prepared = NativeRunner::new(config)
         .map(|r| (r, ()))
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) });
+    #[allow(unused_mut)] // Non-Linux runner is not moved into broker preparation.
     let (mut runner, binding) = match prepared {
         Ok(value) => value,
         Err(error) => {
@@ -283,47 +326,77 @@ pub async fn run(options: Options) -> Result<()> {
             return Err(error);
         }
     };
+    let shared_vault = clawbell_proxy::dlp::shared_vault(limits.message_bytes)?;
+    #[cfg(target_os = "linux")]
+    let (prepared_runner, broker) =
+        prepare_broker(runner, &policy, store.clone(), limits, shared_vault.clone()).await?;
+    #[cfg(target_os = "linux")]
+    let mut runner = prepared_runner;
+    #[cfg(not(target_os = "linux"))]
+    let broker = None;
     let monitor = clawbell_proxy::monitor::Monitor::new()?;
     let endpoint = monitor_endpoint(options.monitor_socket, &workspace)?;
     #[allow(unused_mut)] // Non-Linux builds do not add the scan-bound wrapper.
-    let mut gate = compose_monitor(
+    let mut gate = compose_monitor_shared(
         policy,
         baseline,
         store.clone(),
         identity,
         endpoint.as_ref().map(|_| monitor.clone()),
+        Some(shared_vault),
     )?;
     #[cfg(target_os = "linux")]
     let mut gate = match binding {
         Some(binding) => LaunchGate::Skill(clawbell_proxy::skill::SkillGate::new(gate, binding)),
         None => LaunchGate::Ordinary(gate),
     };
+    let result = supervise(
+        &mut gate,
+        &mut runner,
+        &monitor,
+        endpoint.as_deref(),
+        broker,
+        limits,
+    )
+    .await;
+    clawbell_sandbox::Runner::terminate(&mut runner).await?;
+    // A session/launch is not a successful operation just because pipes closed.
+    store.record(launch, Outcome::Unknown).await?;
+    session_result(result)
+}
+
+async fn supervise(
+    gate: &mut impl Gate,
+    runner: &mut impl clawbell_sandbox::Runner,
+    monitor: &clawbell_proxy::monitor::Monitor,
+    endpoint: Option<&std::path::Path>,
+    broker: Option<(clawbell_proxy::broker::Broker, tokio::net::UnixStream)>,
+    limits: Limits,
+) -> std::result::Result<(), Error> {
+    let broker_server = serve_broker(broker);
     let server = async {
-        if let Some(path) = &endpoint {
+        if let Some(path) = endpoint {
             monitor.serve(path).await
         } else {
             std::future::pending().await
         }
     };
-    let result = {
+    {
         let session = clawbell_proxy::stdio::run(
             tokio::io::stdin(),
             tokio::io::stdout(),
-            &mut gate,
-            &mut runner,
+            gate,
+            runner,
             limits,
         );
         tokio::pin!(session);
         tokio::select! {
             biased;
             _ = server => Err(Error::Denied),
+            _ = broker_server => Err(Error::Denied),
             result = &mut session => result,
         }
-    };
-    clawbell_sandbox::Runner::terminate(&mut runner).await?;
-    // A session/launch is not a successful operation just because pipes closed.
-    store.record(launch, Outcome::Unknown).await?;
-    session_result(result)
+    }
 }
 
 pub(crate) fn validate_owner_paths(options: &Options) -> Result<()> {
@@ -429,6 +502,16 @@ pub(crate) fn compose_monitor(
     identity: String,
     monitor: Option<clawbell_proxy::monitor::Monitor>,
 ) -> Result<impl Gate> {
+    compose_monitor_shared(policy, baseline, store, identity, monitor, None)
+}
+fn compose_monitor_shared(
+    policy: Arc<Policy>,
+    baseline: BaselineStore,
+    store: OperationStore,
+    identity: String,
+    monitor: Option<clawbell_proxy::monitor::Monitor>,
+    shared: Option<clawbell_proxy::dlp::SharedVault>,
+) -> Result<impl Gate> {
     let audit = AuditGate {
         remote: false,
         store: store.clone(),
@@ -440,8 +523,12 @@ pub(crate) fn compose_monitor(
     } else {
         gate
     };
+    let mut vault = LocalVaultGate::new(gate, Vec::new(), Limits::default().message_bytes)?;
+    if let Some(shared) = shared {
+        vault = vault.with_vault(shared);
+    }
     Ok(SessionGate {
-        inner: LocalVaultGate::new(gate, Vec::new(), Limits::default().message_bytes)?,
+        inner: vault,
         store,
     })
 }
@@ -534,6 +621,7 @@ pub(crate) fn compose_remote(
     store: OperationStore,
     identity: String,
     bearer: Option<&clawbell_proxy::network::Bearer>,
+    credentials: Option<clawbell_proxy::oauth::Credentials>,
     monitor: Option<clawbell_proxy::monitor::Monitor>,
 ) -> Result<impl Gate + use<>> {
     let audit = AuditGate {
@@ -547,8 +635,13 @@ pub(crate) fn compose_remote(
     } else {
         policy_gate
     };
+    let mut vault =
+        LocalVaultGate::for_remote(policy_gate, bearer, Limits::default().message_bytes)?;
+    if let Some(credentials) = credentials {
+        vault = vault.with_credentials(credentials);
+    }
     Ok(SessionGate {
-        inner: LocalVaultGate::for_remote(policy_gate, bearer, Limits::default().message_bytes)?,
+        inner: vault,
         store,
     })
 }

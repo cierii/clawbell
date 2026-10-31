@@ -95,7 +95,7 @@ fn refuses_user_edits_backup_collision_links_and_unsafe_formats() -> files::Resu
     for (i, bytes) in [
         br#"{"mcpServers":{"x":{"command":"echo"}}}"#.as_slice(),
         br#"{"mcpServers":{"x":{"command":"/usr/bin/python3","env":{"TEST":"synthetic"}}}}"#,
-        br#"{"servers":{"x":{"url":"https://fixture.invalid"}}}"#,
+        br#"{"servers":{"x":{"url":"https://fixture.invalid","headers":{"Authorization":"synthetic"}}}}"#,
         br#"{"servers":{},"servers":{}}"#,
         b"not json",
     ]
@@ -152,5 +152,62 @@ fn hardlinks_and_untrusted_parent_are_refused() -> files::Result<()> {
     std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o777))?;
     assert!(bind::init(&path, &dir.settings()).is_err());
     std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[test]
+fn mixed_remote_binding_preserves_exact_backup_and_refuses_credentials() -> files::Result<()> {
+    let dir = Directory::new()?;
+    let original = br#"{"servers":{"remote":{"type":"http","url":"https://mcp.example/mcp"},"local":{"command":"/usr/bin/true"}}}"#;
+    let path = dir.0.join("remote.json");
+    files::create(&path, original)?;
+    bind::init(&path, &dir.settings())?;
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let remote = &value["servers"]["remote"];
+    assert_eq!(remote["type"], "stdio");
+    assert_eq!(remote["args"][0], "proxy-http");
+    assert_eq!(remote["args"][2], "https://mcp.example/mcp");
+    assert!(remote.get("url").is_none());
+    bind::unbind(&path)?;
+    assert_eq!(std::fs::read(&path)?, original);
+    for (i, url) in [
+        "http://127.0.0.1/mcp",
+        "https://user:synthetic@mcp.example/mcp",
+        "https://mcp.example/mcp?token=synthetic",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let path = dir.0.join(format!("unsafe-remote-{i}.json"));
+        files::create(
+            &path,
+            &serde_json::to_vec(&serde_json::json!({"servers":{"r":{"url":url}}}))?,
+        )?;
+        assert!(bind::init(&path, &dir.settings()).is_err());
+        assert!(!path.with_extension("json.bak").exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn remote_oauth_binding_carries_only_public_configuration() -> files::Result<()> {
+    let dir = Directory::new()?;
+    let path = dir.0.join("oauth.json");
+    let original = br#"{"servers":{"remote":{"url":"https://mcp.example/mcp","clawbellOAuth":{"issuer":"https://issuer.example/","client_id":"public-client","scopes":["mcp"]}}}}"#;
+    files::create(&path, original)?;
+    bind::init(&path, &dir.settings())?;
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let args = value["servers"]["remote"]["args"]
+        .as_array()
+        .ok_or("args")?;
+    assert!(args.iter().any(|v| v == "--oauth-persist"));
+    assert!(args.iter().any(|v| v == "https://issuer.example/"));
+    assert!(
+        !args
+            .iter()
+            .any(|v| v == "--oauth-login" || v == "--oauth-register")
+    );
+    bind::unbind(&path)?;
+    assert_eq!(std::fs::read(&path)?, original);
     Ok(())
 }

@@ -7,12 +7,24 @@ use clawbell_core::{
     signatures::{catalog_digest, tool_digests},
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+#[derive(Default)]
+struct Catalog {
+    cursor: Option<String>,
+    cursors: HashSet<String>,
+    names: HashSet<String>,
+    pins: Vec<Value>,
+    prompts: HashMap<String, Vec<(String, bool)>>,
+    page: usize,
+    bytes: usize,
+    pending: bool,
+}
 #[derive(Default)]
 pub(crate) struct ContentPolicy {
     pending: HashMap<String, (String, Option<String>)>,
     prompts: HashMap<String, Vec<(String, bool)>>,
+    catalogs: HashMap<String, Catalog>,
 }
 impl ContentPolicy {
     // True means this validated immutable request still needs owner consent.
@@ -43,13 +55,15 @@ impl ContentPolicy {
                 return Ok(false);
             };
             if message.value().get("error").is_some() {
+                self.catalogs.remove(&method);
+                if method == "prompts/list" {
+                    self.prompts.clear();
+                }
                 return Ok(false);
             }
             let result = message.value().get("result").ok_or(Error::Protocol)?;
-            let (field, key) = match method.as_str() {
-                "resources/list" => ("resources", "uri"),
-                "resources/templates/list" => ("resourceTemplates", "uriTemplate"),
-                "prompts/list" => ("prompts", "name"),
+            match method.as_str() {
+                "resources/list" | "resources/templates/list" | "prompts/list" => {}
                 "resources/read" => {
                     let typed =
                         serde_json::from_value::<rmcp::model::ReadResourceResult>(result.clone())
@@ -72,50 +86,111 @@ impl ContentPolicy {
                     return Ok(false);
                 }
                 _ => return Err(Error::Denied),
-            };
-            validate_list(&method, result)?;
-            if result.get("nextCursor").is_some() {
-                return Err(Error::Refused(Reason::CatalogDenied));
             }
-            let entries = result
-                .get(field)
-                .and_then(Value::as_array)
-                .ok_or(Error::Protocol)?;
-            if entries.len() > 4096 {
-                return Err(Error::Limit);
-            }
-            let mut pins = Vec::new();
-            let mut prompts = HashMap::new();
-            for entry in entries {
-                let name = entry
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty() && s.len() <= 4096)
-                    .ok_or(Error::Protocol)?;
-                // Keep complete untrusted metadata under an opaque signed field.
-                // URI keys can exceed the tool-name bound; hash them canonically.
-                let name_digest = clawbell_core::signatures::argument_digest(&json!({"key":name}))
-                    .map_err(|_| Error::Protocol)?;
-                pins.push(json!({"name":name_digest,"inputSchema":{},"metadata":entry}));
-                if method == "prompts/list" {
-                    let arguments = prompt_arguments(entry)?;
-                    prompts.insert(name.to_owned(), arguments);
-                }
-            }
-            store
-                .check(
-                    &clawbell_core::signatures::scoped_catalog_identity(server, &method, 0)
-                        .map_err(|_| Error::Denied)?,
-                    catalog_digest(&pins).map_err(|_| Error::Protocol)?,
-                    tool_digests(&pins).map_err(|_| Error::Protocol)?,
-                )
-                .await
-                .map_err(|_| Error::Refused(Reason::CatalogDenied))?;
-            if method == "prompts/list" {
-                self.prompts = prompts;
-            }
+            self.catalog(store, server, &method, result, message.encode()?.len())
+                .await?;
         }
         Ok(false)
+    }
+    async fn catalog(
+        &mut self,
+        store: &BaselineStore,
+        server: &str,
+        method: &str,
+        result: &Value,
+        bytes: usize,
+    ) -> Result<(), Error> {
+        let (field, key) = match method {
+            "resources/list" => ("resources", "uri"),
+            "resources/templates/list" => ("resourceTemplates", "uriTemplate"),
+            "prompts/list" => ("prompts", "name"),
+            _ => return Err(Error::Denied),
+        };
+        validate_list(method, result)?;
+        let next = result
+            .get("nextCursor")
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 1024)
+                    .map(str::to_owned)
+                    .ok_or(Error::Protocol)
+            })
+            .transpose()?;
+        let catalog = self.catalogs.get_mut(method).ok_or(Error::Protocol)?;
+        if !catalog.pending {
+            return Err(Error::Protocol);
+        }
+        catalog.pending = false;
+        if next
+            .as_ref()
+            .is_some_and(|s| !catalog.cursors.insert(s.clone()))
+        {
+            return Err(Error::Refused(Reason::CatalogDenied));
+        }
+        catalog.bytes += bytes;
+        if catalog.bytes > 8 * 1024 * 1024 || catalog.page >= 64 {
+            return Err(Error::Limit);
+        }
+        let entries = result
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or(Error::Protocol)?;
+        if catalog.names.len() + entries.len() > 4096 || (entries.is_empty() && next.is_some()) {
+            return Err(Error::Limit);
+        }
+        let mut pins = Vec::new();
+        let mut prompts = HashMap::new();
+        for entry in entries {
+            let name = entry
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty() && s.len() <= 4096)
+                .ok_or(Error::Protocol)?;
+            if !catalog.names.insert(name.to_owned()) {
+                return Err(Error::Refused(Reason::CatalogDenied));
+            }
+            // Keep complete untrusted metadata under an opaque signed field.
+            // URI keys can exceed the tool-name bound; hash them canonically.
+            let name_digest = clawbell_core::signatures::argument_digest(&json!({"key":name}))
+                .map_err(|_| Error::Protocol)?;
+            pins.push(json!({"name":name_digest,"inputSchema":{},"metadata":entry}));
+            if method == "prompts/list" {
+                let arguments = prompt_arguments(entry)?;
+                prompts.insert(name.to_owned(), arguments);
+            }
+        }
+        store
+            .check(
+                &clawbell_core::signatures::scoped_catalog_identity(server, method, catalog.page)
+                    .map_err(|_| Error::Denied)?,
+                catalog_digest(&pins).map_err(|_| Error::Protocol)?,
+                tool_digests(&pins).map_err(|_| Error::Protocol)?,
+            )
+            .await
+            .map_err(|_| Error::Refused(Reason::CatalogDenied))?;
+        catalog.pins.extend(pins);
+        catalog.prompts.extend(prompts);
+        catalog.cursor = next;
+        catalog.page += 1;
+        if catalog.cursor.is_none() {
+            // A separate aggregate identity prevents a reordered/partitioned
+            // enumeration from authorizing a different complete catalog.
+            if catalog.page > 1 {
+                store
+                    .check(
+                        &clawbell_core::signatures::scoped_catalog_identity(server, method, 64)
+                            .map_err(|_| Error::Denied)?,
+                        catalog_digest(&catalog.pins).map_err(|_| Error::Protocol)?,
+                        tool_digests(&catalog.pins).map_err(|_| Error::Protocol)?,
+                    )
+                    .await
+                    .map_err(|_| Error::Refused(Reason::CatalogDenied))?;
+            }
+            if method == "prompts/list" {
+                self.prompts = std::mem::take(&mut catalog.prompts);
+            }
+        }
+        Ok(())
     }
     fn request(
         &mut self,
@@ -144,8 +219,27 @@ impl ContentPolicy {
         if decision == Decision::Deny {
             return Err(Error::Refused(Reason::MethodDenied));
         }
-        if message.value().pointer("/params/cursor").is_some() {
-            // No silent truncation or cursor forwarding without a pin contract.
+        let cursor = message.value().pointer("/params/cursor");
+        if matches!(
+            method,
+            "resources/list" | "resources/templates/list" | "prompts/list"
+        ) {
+            let catalog = self.catalogs.entry(method.to_owned()).or_default();
+            if catalog.pending {
+                return Err(Error::Refused(Reason::CatalogDenied));
+            }
+            if let Some(cursor) = cursor {
+                if cursor.as_str().is_none() || cursor.as_str() != catalog.cursor.as_deref() {
+                    return Err(Error::Refused(Reason::CatalogDenied));
+                }
+            } else {
+                *catalog = Catalog::default();
+                if method == "prompts/list" {
+                    self.prompts.clear();
+                }
+            }
+            catalog.pending = true;
+        } else if cursor.is_some() {
             return Err(Error::Refused(Reason::CatalogDenied));
         }
         if method == "prompts/get" {

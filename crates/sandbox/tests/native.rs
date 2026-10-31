@@ -478,3 +478,64 @@ async fn native_memory_and_task_exhaustion_stay_in_the_containment_group() -> Re
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires real Linux namespace and cgroup v2 delegation"]
+async fn inherited_broker_channel_does_not_enable_network_socket_creation() -> Result {
+    let parent = PathBuf::from(std::env::var("CLAWBELL_TEST_CGROUP")?);
+    let root = std::env::temp_dir().join(format!("clawbell-native-broker-{}", std::process::id()));
+    fs::create_dir(&root)?;
+    let script = r"
+import os,socket
+fd=int(os.environ['CLAWBELL_BROKER_FD'])
+assert fd == 3
+for family in [socket.AF_INET,socket.AF_INET6,socket.AF_UNIX]:
+ try:
+  socket.socket(family,socket.SOCK_STREAM)
+  raise RuntimeError('socket constructor escaped seccomp')
+ except PermissionError:
+  pass
+os.write(fd,b'broker-ready\n')
+assert os.read(fd,128) == b'public-response\n'
+print('broker-only',flush=True)
+";
+    let (host, child) = std::os::unix::net::UnixStream::pair()?;
+    host.set_nonblocking(true)?;
+    let mut host = BufReader::new(tokio::net::UnixStream::from_std(host)?);
+    let mut runner = NativeRunner::new(config(
+        root.clone(),
+        parent,
+        vec!["-c".into(), script.into()],
+    ))?
+    .with_broker(child);
+    let mut child = runner.spawn().await?;
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(5), host.read_line(&mut line)).await??;
+    if line.is_empty() {
+        use tokio::io::AsyncReadExt;
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .ok_or("missing stderr")?
+            .read_to_string(&mut stderr)
+            .await?;
+        return Err(format!("synthetic broker fixture startup failed: {stderr}").into());
+    }
+    assert_eq!(line, "broker-ready\n");
+    host.get_mut().write_all(b"public-response\n").await?;
+    let stdout = child.stdout.take().ok_or("missing stdout")?;
+    let mut stdout = BufReader::new(stdout);
+    line.clear();
+    stdout.read_line(&mut line).await?;
+    assert_eq!(line, "broker-only\n");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await??
+            .success()
+    );
+    runner.terminate().await?;
+    drop(runner);
+    fs::remove_dir(root)?;
+    Ok(())
+}

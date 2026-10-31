@@ -23,6 +23,11 @@ class Upstream(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
 
+    def do_GET(self):
+        self.send_response(405)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         method = message["method"]

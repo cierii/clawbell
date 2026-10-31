@@ -12,8 +12,8 @@ use clawbell_core::policy::Policy;
 use clawbell_proxy::{
     Limits,
     http::{Target, relay},
-    network::{Bearer, Endpoint},
-    oauth::Authorization,
+    network::Endpoint,
+    oauth::{Authorization, Discovery, Persist, TokenSession, Tokens},
 };
 use sha2::{Digest, Sha256};
 use std::{net::IpAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -50,17 +50,26 @@ pub struct Options {
     pub state_dir: PathBuf,
     #[arg(long)]
     pub server: String,
-    /// Initiate an owner OAuth login; requires all three OAuth endpoint/client flags.
-    #[arg(long, requires_all = ["oauth_authorization_url", "oauth_token_url", "oauth_client_id"])]
+    /// Explicit owner login. Supply endpoint/client flags or a trusted issuer.
+    #[arg(long)]
     pub oauth_login: bool,
-    #[arg(long, requires = "oauth_login")]
+    #[arg(long)]
     pub oauth_authorization_url: Option<String>,
-    #[arg(long, requires = "oauth_login")]
+    #[arg(long)]
     pub oauth_token_url: Option<String>,
-    #[arg(long, requires = "oauth_login")]
+    #[arg(long)]
     pub oauth_client_id: Option<String>,
-    #[arg(long, requires = "oauth_login")]
+    #[arg(long)]
     pub oauth_scope: Vec<String>,
+    /// Trusted HTTPS issuer; discovery may not expand beyond its origin.
+    #[arg(long, conflicts_with_all = ["oauth_authorization_url", "oauth_token_url"])]
+    pub oauth_issuer: Option<String>,
+    /// Explicitly register a public client with the trusted discovered issuer.
+    #[arg(long, requires_all = ["oauth_issuer", "oauth_login"], conflicts_with = "oauth_client_id")]
+    pub oauth_register: bool,
+    /// Persist credentials in a private host store and reuse/refresh on reconnect.
+    #[arg(long)]
+    pub oauth_persist: bool,
 }
 
 impl Options {
@@ -142,25 +151,138 @@ async fn callback(listener: TcpListener) -> Result<(Zeroizing<String>, String)> 
         state.ok_or(Code("oauth_callback_refused"))?,
     ))
 }
-async fn login(options: &Options, limits: Limits) -> Result<Option<Bearer>> {
-    if !options.oauth_login {
+async fn login(
+    options: &Options,
+    binding: &str,
+    audit: OperationStore,
+    limits: Limits,
+) -> Result<Option<Arc<TokenSession>>> {
+    let configured = options.oauth_login
+        || options.oauth_persist
+        || options.oauth_issuer.is_some()
+        || options.oauth_token_url.is_some()
+        || options.oauth_authorization_url.is_some()
+        || options.oauth_client_id.is_some();
+    if !configured {
         return Ok(None);
     }
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let redirect = format!("http://{}/callback", listener.local_addr()?);
-    let (flow, url) = Authorization::begin(
-        options
-            .oauth_authorization_url
-            .as_deref()
-            .ok_or(Code("oauth_configuration_required"))?,
-        options
-            .oauth_token_url
-            .as_deref()
-            .ok_or(Code("oauth_configuration_required"))?,
-        options
+    let cache = if options.oauth_persist {
+        Some(Arc::new(crate::oauth_store::Store::open(
+            &options.state_dir,
+            binding,
+        )?))
+    } else {
+        None
+    };
+    let cached = cache.as_ref().map(|c| c.load()).transpose()?.flatten();
+    let metadata = if let Some(issuer) = &options.oauth_issuer {
+        Some(Discovery::discover(&options.url, issuer, limits).await?)
+    } else {
+        None
+    };
+    let authorization_url = metadata
+        .as_ref()
+        .map(|d| d.authorization_url.as_str())
+        .or(options.oauth_authorization_url.as_deref())
+        .ok_or(Code("oauth_configuration_required"))?;
+    let token_url = metadata
+        .as_ref()
+        .map(|d| d.token_url.as_str())
+        .or(options.oauth_token_url.as_deref())
+        .ok_or(Code("oauth_configuration_required"))?;
+    let credential_binding = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(
+            binding,
+            authorization_url,
+            token_url
+        ))?)
+    );
+    let tokens = if let Some(bytes) = cached.filter(|_| !options.oauth_login) {
+        let tokens = Tokens::decode(&bytes, &credential_binding, &options.url)?;
+        if options
             .oauth_client_id
             .as_deref()
-            .ok_or(Code("oauth_configuration_required"))?,
+            .is_some_and(|id| id != tokens.client_id())
+        {
+            return Err(Code("oauth_client_binding_changed").into());
+        }
+        tokens
+    } else {
+        if !options.oauth_login {
+            return Err(Code("oauth_login_required").into());
+        }
+        interactive_login(
+            options,
+            metadata.as_ref(),
+            authorization_url,
+            token_url,
+            &audit,
+            limits,
+        )
+        .await?
+    };
+    let persist: Option<Persist> = cache.map(|cache| {
+        Arc::new(move |bytes: &[u8]| cache.save(bytes).map_err(|_| clawbell_proxy::Error::Denied))
+            as Persist
+    });
+    if let Some(save) = &persist {
+        save(&tokens.encode(&credential_binding)?)?;
+    }
+    let session = Arc::new(
+        TokenSession::new(
+            tokens,
+            token_url,
+            credential_binding,
+            persist,
+            audit,
+            limits,
+        )
+        .await?,
+    );
+    // Refresh expired cached credentials during initialization, before the DLP
+    // gate is composed. The same session handles subsequent rotations.
+    session.bearer(limits).await?;
+    Ok(Some(session))
+}
+async fn interactive_login(
+    options: &Options,
+    metadata: Option<&Discovery>,
+    authorization_url: &str,
+    token_url: &str,
+    audit: &OperationStore,
+    limits: Limits,
+) -> Result<Tokens> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let redirect = format!("http://{}/callback", listener.local_addr()?);
+    let client_id = if options.oauth_register {
+        let intent = audit.record(0, Outcome::Intent).await?;
+        let result = metadata
+            .ok_or(Code("oauth_configuration_required"))?
+            .register(&redirect, limits)
+            .await;
+        audit
+            .record_reason(
+                intent,
+                if result.is_ok() {
+                    Outcome::Response
+                } else {
+                    Outcome::Unknown
+                },
+                Reason::OAuthInitialization,
+            )
+            .await?;
+        result?
+    } else {
+        options
+            .oauth_client_id
+            .clone()
+            .ok_or(Code("oauth_configuration_required"))?
+    };
+    let (flow, url) = Authorization::begin(
+        authorization_url,
+        token_url,
+        &client_id,
         &redirect,
         &options.url,
         &options.oauth_scope,
@@ -171,7 +293,7 @@ async fn login(options: &Options, limits: Limits) -> Result<Option<Bearer>> {
     let (code, state) = tokio::time::timeout(Duration::from_secs(300), callback(listener))
         .await
         .map_err(|_| Code("oauth_login_timeout"))??;
-    Ok(Some(flow.complete(code, &state, limits).await?))
+    Ok(flow.complete_tokens(code, &state, limits).await?)
 }
 pub async fn run(options: Options) -> Result<()> {
     let limits = options.limits()?;
@@ -204,7 +326,9 @@ pub async fn run(options: Options) -> Result<()> {
             &identity_url,
             &options.oauth_client_id,
             &options.oauth_authorization_url,
-            &options.oauth_token_url
+            &options.oauth_token_url,
+            &options.oauth_issuer,
+            &options.oauth_scope
         ))?)
     );
     let store = OperationStore::open_session(
@@ -221,19 +345,20 @@ pub async fn run(options: Options) -> Result<()> {
         options.url = reqwest::Url::parse(&options.url)?.to_string();
         let endpoint = Endpoint::connect(&options.url, options.private_ip, limits).await?;
         stage = Reason::OAuthInitialization;
-        let bearer = login(&options, limits).await?;
+        let oauth = login(&options, &identity, store.clone(), limits).await?;
         stage = Reason::RemoteInitialization;
         let mut gate = crate::launch::compose_remote(
             policy,
             baseline,
             store.clone(),
             identity,
-            bearer.as_ref(),
+            None,
+            oauth.as_ref().map(|s| s.credentials()),
             endpoint_path.as_ref().map(|_| monitor.clone()),
         )?;
         stage = Reason::OAuthInitialization;
-        let endpoint = match bearer {
-            Some(bearer) => endpoint.with_bearer(bearer)?,
+        let endpoint = match oauth {
+            Some(session) => endpoint.with_oauth(session)?,
             None => endpoint,
         };
         stage = Reason::Unspecified;
@@ -345,6 +470,9 @@ mod tests {
                 policy,
                 state_dir: root.clone(),
                 server: "synthetic-remote".into(),
+                oauth_issuer: None,
+                oauth_register: false,
+                oauth_persist: false,
                 oauth_login: case == "oauth",
                 oauth_authorization_url: Some("invalid".into()),
                 oauth_token_url: Some("invalid".into()),

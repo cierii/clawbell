@@ -16,6 +16,8 @@
 //! ```
 
 #[cfg(unix)]
+pub mod broker;
+#[cfg(unix)]
 mod content;
 pub mod dlp;
 pub mod http;
@@ -23,6 +25,8 @@ pub mod http;
 pub mod monitor;
 pub mod network;
 pub mod oauth;
+mod oauth_discovery;
+mod oauth_session;
 #[cfg(unix)]
 pub mod policy;
 pub mod protocol;

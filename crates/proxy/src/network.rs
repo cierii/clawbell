@@ -66,6 +66,7 @@ pub struct Endpoint {
     url: Url,
     addresses: Vec<SocketAddr>,
     bearer: Option<Bearer>,
+    oauth: Option<std::sync::Arc<crate::oauth::TokenSession>>,
 }
 impl Endpoint {
     /// Resolve and pin DNS before any request. TLS retains the URL hostname.
@@ -120,7 +121,6 @@ impl Endpoint {
             .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none())
             .resolve_to_addrs(host, &addresses)
-            .timeout(limits.request_timeout)
             .connect_timeout(limits.request_timeout)
             .build()
             .map_err(|_| Error::Transport)?;
@@ -129,6 +129,7 @@ impl Endpoint {
             url,
             addresses,
             bearer: None,
+            oauth: None,
         })
     }
     /// Bind a credential to this exact HTTPS endpoint, without redirect forwarding.
@@ -147,6 +148,19 @@ impl Endpoint {
         self.bearer = Some(bearer);
         Ok(self)
     }
+    /// Attach host-managed OAuth refresh for this exact HTTPS resource.
+    /// # Errors
+    /// Refuses plaintext; the session validates its bearer audience per request.
+    pub fn with_oauth(
+        mut self,
+        session: std::sync::Arc<crate::oauth::TokenSession>,
+    ) -> Result<Self, Error> {
+        if self.url.scheme() != "https" || self.bearer.is_some() {
+            return Err(Error::Denied);
+        }
+        self.oauth = Some(session);
+        Ok(self)
+    }
     /// Execute one already-authorized and inspected request. This is a trusted
     /// adapter API, never a raw sandbox proxy. The caller must durably audit intent
     /// before calling and inspect the complete bounded response before disclosure.
@@ -159,6 +173,30 @@ impl Endpoint {
         headers: HeaderMap,
         body: Vec<u8>,
         limits: Limits,
+    ) -> Result<Response, Error> {
+        let bearer = if let Some(session) = &self.oauth {
+            let bearer = session.bearer(limits).await?;
+            if bearer.audience.as_deref() != Some(self.url.as_str()) {
+                return Err(Error::Denied);
+            }
+            Some(bearer)
+        } else {
+            None
+        };
+        let auth = bearer
+            .as_ref()
+            .or(self.bearer.as_ref())
+            .map(Bearer::header)
+            .transpose()?;
+        self.send_raw(method, headers, body, limits, auth).await
+    }
+    pub(crate) async fn send_raw(
+        &self,
+        method: Method,
+        headers: HeaderMap,
+        body: Vec<u8>,
+        limits: Limits,
+        auth: Option<HeaderValue>,
     ) -> Result<Response, Error> {
         if !matches!(method, Method::GET | Method::POST | Method::DELETE)
             || body.len() > limits.message_bytes
@@ -176,17 +214,18 @@ impl Endpoint {
             .request(method, self.url.clone())
             .headers(headers)
             .body(body);
-        if let Some(bearer) = &self.bearer {
-            request = request.header(AUTHORIZATION, bearer.header()?);
+        if let Some(auth) = auth {
+            request = request.header(AUTHORIZATION, auth);
         }
-        let response = request.send().await.map_err(|_| Error::Transport)?;
+        let response = tokio::time::timeout(limits.request_timeout, request.send())
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|_| Error::Transport)?;
         if !response
             .remote_addr()
             .is_some_and(|peer| self.addresses.contains(&peer))
+            || response.status().is_redirection()
         {
-            return Err(Error::Denied);
-        }
-        if response.status().is_redirection() {
             return Err(Error::Denied);
         }
         Ok(response)
@@ -296,6 +335,7 @@ mod tests {
             url: Url::parse("https://other.example/mcp")?,
             addresses: vec![],
             bearer: None,
+            oauth: None,
         };
         assert!(
             endpoint

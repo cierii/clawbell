@@ -40,8 +40,9 @@ impl ResourceLimits {
     }
 }
 /// Launch configuration supplied only after owner authorization and durable audit.
-/// Only a credential-free, read-only workspace is exposed; no host write or network
-/// exceptions are supported. Interpreters are authorized by choosing the executable.
+/// Only a credential-free, read-only workspace is exposed. Direct network access
+/// and host writes remain denied; an explicit host broker can supply a connected
+/// capability without enabling sockets. Interpreters require owner selection.
 pub struct NativeConfig {
     /// Trusted directory containing code/data, never a home or credentials directory.
     pub workspace: PathBuf,
@@ -62,6 +63,14 @@ pub struct NativeRunner {
     inner: crate::linux::LinuxRunner,
 }
 impl NativeRunner {
+    /// Attach a connected, session-scoped broker channel without enabling sockets
+    /// or sharing the host network namespace.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn with_broker(mut self, stream: std::os::unix::net::UnixStream) -> Self {
+        self.inner = self.inner.with_broker(stream);
+        self
+    }
     /// Exercise the actual containment profile using only trusted `/usr/bin/true`.
     /// The configured upstream is never executed. Temporary cgroups are reclaimed;
     /// client files, workspace contents and persistent host settings are untouched.

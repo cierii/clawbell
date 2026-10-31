@@ -190,6 +190,15 @@ pub struct SkillRunner {
     runner: LinuxRunner,
     _stage: Stage,
 }
+impl SkillRunner {
+    /// Attach a host broker channel; snapshot, seccomp and resource limits remain
+    /// mandatory. The caller must authorize and audit every broker request.
+    #[must_use]
+    pub fn with_broker(mut self, stream: std::os::unix::net::UnixStream) -> Self {
+        self.runner = self.runner.with_broker(stream);
+        self
+    }
+}
 impl Runner for SkillRunner {
     async fn spawn(&mut self) -> Result<Child, LaunchError> {
         self.runner.spawn().await
