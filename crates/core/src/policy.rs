@@ -45,6 +45,10 @@ struct Config {
     version: String,
     tools: Vec<Tool>,
     rules: Vec<Rule>,
+    #[serde(default)]
+    protocol: Vec<ProtocolRule>,
+    #[serde(default)]
+    skills: SkillGrants,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +73,44 @@ struct Rule {
     path_prefix: Option<String>,
     arguments_regex: Option<String>,
 }
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillGrants {
+    #[serde(default)]
+    allow_execution: bool,
+    #[serde(default)]
+    allow_shell: bool,
+}
+/// Owner policy permission for arbitrary skill code inside mandatory native
+/// containment. Opaque to callers: a scan or instruction cannot manufacture it.
+#[derive(Clone)]
+pub struct SkillPermission {
+    fingerprint: [u8; 32],
+    execution: bool,
+    shell: bool,
+}
+impl SkillPermission {
+    /// Exact source fingerprint bound by the scan receipt.
+    #[must_use]
+    pub fn fingerprint(&self) -> [u8; 32] {
+        self.fingerprint
+    }
+    /// Arbitrary interpreter code can launch a shell; both explicit grants are
+    /// required because static inspection cannot establish the absence of exec.
+    #[must_use]
+    pub fn permits_execution(&self) -> bool {
+        self.execution && self.shell
+    }
+}
+/// Explicit permission for a resource or prompt operation. Targets are exact
+/// URI/name strings; no wildcard, prefix or tool annotation grants access.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtocolRule {
+    method: String,
+    target: Option<String>,
+    decision: Decision,
+}
 struct CompiledRule {
     rule: Rule,
     regex: Option<Regex>,
@@ -80,6 +122,8 @@ pub struct Policy {
     fingerprint: [u8; 32],
     tools: Vec<Tool>,
     rules: Vec<CompiledRule>,
+    protocol: Vec<ProtocolRule>,
+    skills: SkillGrants,
 }
 /// Normalize an owner-relative POSIX path without resolving untrusted symlinks.
 /// Absolute paths, parent traversal and platform-dependent separators are refused.
@@ -137,10 +181,26 @@ impl Policy {
         let config: Config = toml::from_str(source).map_err(|_| PolicyError)?;
         if config.version.is_empty()
             || config.version.len() > 128
-            || config.tools.len() > 256
-            || config.rules.len() > 256
+            || config.tools.len() > 4096
+            || config.rules.len() > 4096
+            || config.protocol.len() > 256
         {
             return Err(PolicyError);
+        }
+        for rule in &config.protocol {
+            let targeted = matches!(rule.method.as_str(), "resources/read" | "prompts/get");
+            if !targeted
+                && !matches!(
+                    rule.method.as_str(),
+                    "resources/list" | "resources/templates/list" | "prompts/list"
+                )
+                || targeted != rule.target.is_some()
+                || rule.target.as_ref().is_some_and(|s| {
+                    s.is_empty() || s.len() > 4096 || s.chars().any(char::is_control)
+                })
+            {
+                return Err(PolicyError);
+            }
         }
         let mut names = std::collections::HashSet::new();
         for tool in &config.tools {
@@ -188,7 +248,46 @@ impl Policy {
             version: config.version,
             tools: config.tools,
             rules,
+            protocol: config.protocol,
+            skills: config.skills,
         })
+    }
+    /// Capture explicit skill and shell grants with this exact policy snapshot.
+    #[must_use]
+    pub fn skill_permission(&self) -> SkillPermission {
+        SkillPermission {
+            fingerprint: self.fingerprint,
+            execution: self.skills.allow_execution,
+            shell: self.skills.allow_shell,
+        }
+    }
+    /// Evaluate resource/prompt permission separately from tools. Deny overrides
+    /// approval; no rule means deny. A listed URI never authorizes reading it.
+    #[must_use]
+    pub fn evaluate_protocol(&self, method: &str, target: Option<&str>) -> Evaluation {
+        let mut result = Evaluation::deny("default_deny");
+        for rule in &self.protocol {
+            if rule.method != method || rule.target.as_deref() != target {
+                continue;
+            }
+            match rule.decision {
+                Decision::Deny => return Evaluation::deny("rule_deny"),
+                Decision::RequireApproval => {
+                    result = Evaluation {
+                        decision: Decision::RequireApproval,
+                        reason: "owner_approval_required",
+                    }
+                }
+                Decision::Allow if result.decision != Decision::RequireApproval => {
+                    result = Evaluation {
+                        decision: Decision::Allow,
+                        reason: "rule_allow",
+                    }
+                }
+                Decision::Allow => {}
+            }
+        }
+        result
     }
     /// Digest of the exact immutable owner configuration, including same-version edits.
     #[must_use]

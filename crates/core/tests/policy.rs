@@ -123,3 +123,54 @@ fn catalog_signature_detects_changes_but_ignores_object_key_order() -> Result {
     assert!(catalog_digest(&[json!({"name":"missing schema"})]).is_err());
     Ok(())
 }
+
+#[test]
+fn protocol_permissions_and_skill_execution_are_explicit_and_fail_closed() -> Result {
+    let base = "version='protocol'\ntools=[]\nrules=[]\n";
+    let policy = Policy::parse(base)?;
+    assert_eq!(
+        policy
+            .evaluate_protocol("resources/read", Some("fixture://public"))
+            .decision,
+        Decision::Deny
+    );
+    assert!(!policy.skill_permission().permits_execution());
+    for grants in [
+        "allow_execution=true",
+        "allow_shell=true",
+        "allow_execution=true\nallow_shell=false",
+    ] {
+        assert!(
+            !Policy::parse(&format!("{base}[skills]\n{grants}\n"))?
+                .skill_permission()
+                .permits_execution()
+        );
+    }
+    assert!(
+        Policy::parse(&format!(
+            "{base}[skills]\nallow_execution=true\nallow_shell=true\n"
+        ))?
+        .skill_permission()
+        .permits_execution()
+    );
+    let rules = "[[protocol]]\nmethod='resources/read'\ntarget='fixture://public'\ndecision='allow'\n[[protocol]]\nmethod='resources/read'\ntarget='fixture://public'\ndecision='deny'\n";
+    assert_eq!(
+        Policy::parse(&format!("{base}{rules}"))?
+            .evaluate_protocol("resources/read", Some("fixture://public"))
+            .decision,
+        Decision::Deny
+    );
+    for invalid in [
+        "method='resources/subscribe'",
+        "method='resources/read'",
+        "method='resources/list'\ntarget='fixture://public'",
+    ] {
+        assert!(
+            Policy::parse(&format!(
+                "{base}[[protocol]]\n{invalid}\ndecision='allow'\n"
+            ))
+            .is_err()
+        );
+    }
+    Ok(())
+}

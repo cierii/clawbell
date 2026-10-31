@@ -1,5 +1,5 @@
 //! Conservative production composition: local stdio only, no network, no host
-//! writes, no reverse capabilities/resources/prompts and no secret restoration.
+//! writes, no reverse capabilities and no secret restoration.
 use crate::errors::Code;
 use crate::files::{self, Result};
 use clawbell_audit::{
@@ -16,6 +16,14 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 #[derive(clap::Args)]
 pub struct Options {
+    /// Digest from the owner-reviewed skill-scan of this exact invocation/policy.
+    #[cfg(target_os = "linux")]
+    #[arg(long, requires = "skill_instructions_file")]
+    pub skill_scan_digest: Option<String>,
+    /// UTF-8 initialize.instructions file used by the reviewed skill-scan.
+    #[cfg(target_os = "linux")]
+    #[arg(long, requires = "skill_scan_digest")]
+    pub skill_instructions_file: Option<PathBuf>,
     /// Maximum idle time with no outstanding request (seconds).
     #[arg(long, default_value_t = 600)]
     pub idle_timeout_secs: u64,
@@ -70,6 +78,11 @@ fn permitted(direction: Direction, method: Option<&str>) -> bool {
                     | "ping"
                     | "tools/list"
                     | "tools/call"
+                    | "resources/list"
+                    | "resources/templates/list"
+                    | "resources/read"
+                    | "prompts/list"
+                    | "prompts/get"
                     | "notifications/cancelled"
             )
         ),
@@ -77,12 +90,13 @@ fn permitted(direction: Direction, method: Option<&str>) -> bool {
     }
 }
 struct AuditGate {
+    remote: bool,
     store: OperationStore,
     pending: HashMap<String, i64>,
 }
 impl Gate for AuditGate {
     fn permits_remote(&self) -> bool {
-        false
+        self.remote
     }
     async fn inspect(
         &mut self,
@@ -174,14 +188,7 @@ fn monitor_endpoint(
 /// preflight remains mandatory; missing delegation/isolation cannot spawn directly.
 pub async fn run(options: Options) -> Result<()> {
     let limits = options.limits()?;
-    files::trusted(&options.state_dir)?;
-    files::trusted(
-        options
-            .policy
-            .parent()
-            .ok_or(Code("policy_parent_required"))?,
-    )?;
-    files::trusted(&options.workspace)?;
+    validate_owner_paths(&options)?;
     let workspace = std::fs::canonicalize(&options.workspace)?;
     let state = std::fs::canonicalize(&options.state_dir)?;
     validate_state(&state, &workspace, &options.server)?;
@@ -213,17 +220,30 @@ pub async fn run(options: Options) -> Result<()> {
             ..ResourceLimits::default()
         },
     };
-    let mut runner = match NativeRunner::new(config) {
-        Ok(r) => r,
-        Err(e) => {
+    #[cfg(target_os = "linux")]
+    let prepared = prepare_runner(
+        config,
+        &policy,
+        options.skill_instructions_file,
+        options.skill_scan_digest,
+    )
+    .await;
+    #[cfg(not(target_os = "linux"))]
+    let prepared = NativeRunner::new(config)
+        .map(|r| (r, ()))
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) });
+    let (mut runner, binding) = match prepared {
+        Ok(value) => value,
+        Err(error) => {
             store
                 .record_reason(launch, Outcome::Denied, Reason::IsolationUnavailable)
                 .await?;
-            return Err(e.into());
+            return Err(error);
         }
     };
     let monitor = clawbell_proxy::monitor::Monitor::new()?;
     let endpoint = monitor_endpoint(options.monitor_socket, &workspace)?;
+    #[allow(unused_mut)] // Non-Linux builds do not add the scan-bound wrapper.
     let mut gate = compose_monitor(
         policy,
         baseline,
@@ -231,6 +251,11 @@ pub async fn run(options: Options) -> Result<()> {
         identity,
         endpoint.as_ref().map(|_| monitor.clone()),
     )?;
+    #[cfg(target_os = "linux")]
+    let mut gate = match binding {
+        Some(binding) => LaunchGate::Skill(clawbell_proxy::skill::SkillGate::new(gate, binding)),
+        None => LaunchGate::Ordinary(gate),
+    };
     let server = async {
         if let Some(path) = &endpoint {
             monitor.serve(path).await
@@ -256,6 +281,22 @@ pub async fn run(options: Options) -> Result<()> {
     clawbell_sandbox::Runner::terminate(&mut runner).await?;
     // A session/launch is not a successful operation just because pipes closed.
     store.record(launch, Outcome::Unknown).await?;
+    session_result(result)
+}
+
+fn validate_owner_paths(options: &Options) -> Result<()> {
+    files::trusted(&options.state_dir)?;
+    files::trusted(
+        options
+            .policy
+            .parent()
+            .ok_or(Code("policy_parent_required"))?,
+    )?;
+    files::trusted(&options.workspace)?;
+    Ok(())
+}
+
+fn session_result(result: std::result::Result<(), Error>) -> Result<()> {
     match result {
         Ok(()) | Err(Error::Closed) => Ok(()),
         Err(e) => {
@@ -295,7 +336,7 @@ struct SessionGate<G> {
 }
 impl<G: Gate> Gate for SessionGate<G> {
     fn permits_remote(&self) -> bool {
-        false
+        self.inner.permits_remote()
     }
     async fn inspect(
         &mut self,
@@ -347,6 +388,7 @@ fn compose_monitor(
     monitor: Option<clawbell_proxy::monitor::Monitor>,
 ) -> Result<impl Gate> {
     let audit = AuditGate {
+        remote: false,
         store: store.clone(),
         pending: HashMap::new(),
     };
@@ -368,6 +410,7 @@ mod tests;
 /// Exercise the actual forwarding gate against an intentionally unavailable writer.
 pub(crate) async fn verify_audit_refusal(store: OperationStore) -> Result<()> {
     let mut gate = AuditGate {
+        remote: false,
         store,
         pending: HashMap::new(),
     };
@@ -383,4 +426,108 @@ pub(crate) async fn verify_audit_refusal(store: OperationStore) -> Result<()> {
         return Err(Code("audit_loss_probe_failed").into());
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+enum LaunchRunner {
+    Native(NativeRunner),
+    Skill(clawbell_sandbox::transaction::skill::SkillRunner),
+}
+#[cfg(target_os = "linux")]
+impl clawbell_sandbox::Runner for LaunchRunner {
+    async fn spawn(
+        &mut self,
+    ) -> std::result::Result<tokio::process::Child, clawbell_sandbox::LaunchError> {
+        match self {
+            Self::Native(r) => r.spawn().await,
+            Self::Skill(r) => r.spawn().await,
+        }
+    }
+    async fn terminate(&mut self) -> std::result::Result<(), clawbell_sandbox::LaunchError> {
+        match self {
+            Self::Native(r) => r.terminate().await,
+            Self::Skill(r) => r.terminate().await,
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+enum LaunchGate<G> {
+    Ordinary(G),
+    Skill(clawbell_proxy::skill::SkillGate<G>),
+}
+#[cfg(target_os = "linux")]
+impl<G: Gate> Gate for LaunchGate<G> {
+    fn permits_remote(&self) -> bool {
+        false
+    }
+    async fn inspect(
+        &mut self,
+        direction: Direction,
+        message: &Envelope,
+    ) -> std::result::Result<Envelope, Error> {
+        match self {
+            Self::Ordinary(g) => g.inspect(direction, message).await,
+            Self::Skill(g) => g.inspect(direction, message).await,
+        }
+    }
+    async fn terminated(&mut self, reason: Reason) -> std::result::Result<(), Error> {
+        match self {
+            Self::Ordinary(g) => g.terminated(reason).await,
+            Self::Skill(g) => g.terminated(reason).await,
+        }
+    }
+    async fn finish(&mut self) -> std::result::Result<(), Error> {
+        match self {
+            Self::Ordinary(g) => g.finish().await,
+            Self::Skill(g) => g.finish().await,
+        }
+    }
+}
+
+/// Compose the same policy/audit/DLP boundary for an explicitly remote endpoint.
+/// Credentials are learned by DLP before the first upstream response is exposed.
+pub(crate) fn compose_remote(
+    policy: Arc<Policy>,
+    baseline: BaselineStore,
+    store: OperationStore,
+    identity: String,
+    bearer: Option<&clawbell_proxy::network::Bearer>,
+) -> Result<impl Gate + use<>> {
+    let audit = AuditGate {
+        remote: true,
+        store: store.clone(),
+        pending: HashMap::new(),
+    };
+    let policy_gate = PolicyGate::new(audit, policy, baseline, identity)?;
+    Ok(SessionGate {
+        inner: LocalVaultGate::for_remote(policy_gate, bearer, Limits::default().message_bytes)?,
+        store,
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn prepare_runner(
+    config: NativeConfig,
+    policy: &Policy,
+    instructions: Option<PathBuf>,
+    digest: Option<String>,
+) -> Result<(
+    LaunchRunner,
+    Option<clawbell_sandbox::transaction::skill::InstructionBinding>,
+)> {
+    if let Some(path) = instructions {
+        let command: Vec<_> = std::iter::once(config.executable.clone())
+            .chain(config.arguments.iter().cloned())
+            .collect();
+        let scan = crate::skill_scan::prepare(config.workspace, policy, path, &command).await?;
+        let binding = scan.instruction_binding();
+        let runner = scan.into_runner(
+            digest.as_deref().ok_or(Code("skill_scan_required"))?,
+            config.cgroup_parent,
+            config.limits,
+        )?;
+        Ok((LaunchRunner::Skill(runner), Some(binding)))
+    } else {
+        Ok((LaunchRunner::Native(NativeRunner::new(config)?), None))
+    }
 }

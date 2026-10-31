@@ -500,3 +500,303 @@ async fn approved_store(
     }
     Ok(store)
 }
+
+async fn accept_catalog_pin(store: &BaselineStore, server: &str, tools: &[Value]) -> Result {
+    use clawbell_core::signatures::{catalog_digest, tool_digests};
+    let scoped;
+    let server = if let Some((server, index)) = server.split_once(":tools-page:") {
+        scoped = clawbell_core::signatures::scoped_catalog_identity(
+            server,
+            "tools/list",
+            index.parse()?,
+        )?;
+        scoped.as_str()
+    } else if let Some(server) = server.strip_suffix(":prompts/list") {
+        scoped = clawbell_core::signatures::scoped_catalog_identity(server, "prompts/list", 0)?;
+        scoped.as_str()
+    } else {
+        server
+    };
+
+    if store
+        .check(server, catalog_digest(tools)?, tool_digests(tools)?)
+        .await
+        .is_err()
+    {
+        let review = store
+            .review()
+            .await?
+            .into_iter()
+            .find(|r| r.server == server)
+            .ok_or("missing pin review")?;
+        store.accept(review.id).await?;
+    }
+    Ok(())
+}
+fn page(id: i64, tools: &[Value], next: Option<&str>) -> std::result::Result<Envelope, Error> {
+    let mut result = json!({"tools":tools});
+    if let Some(next) = next {
+        result["nextCursor"] = json!(next);
+    }
+    parse(
+        &json!({"jsonrpc":"2.0","id":id,"result":result}),
+        Direction::Server,
+    )
+}
+fn list_page(id: i64, cursor: Option<&str>) -> std::result::Result<Envelope, Error> {
+    let params = cursor.map_or_else(|| json!({}), |cursor| json!({"cursor":cursor}));
+    parse(
+        &json!({"jsonrpc":"2.0","id":id,"method":"tools/list","params":params}),
+        Direction::Client,
+    )
+}
+#[tokio::test]
+async fn paginated_300_tools_are_pinned_before_use_and_rug_pulls_refuse() -> Result {
+    let directory = Directory::new()?;
+    let store = BaselineStore::open(&directory.0).await?;
+    let tools: Vec<_> = (0..300)
+        .map(|i| json!({"name":format!("tool_{i}"),"inputSchema":{"type":"object"}}))
+        .collect();
+    for (server, slice) in [
+        ("large:tools-page:1", &tools[..256]),
+        ("large:tools-page:2", &tools[256..]),
+        ("large", &tools[..]),
+    ] {
+        accept_catalog_pin(&store, server, slice).await?;
+    }
+    let snapshot = Arc::new(Policy::parse(
+        "version = 'pages'\ntools = [{ name = 'tool_299', effect = 'read' }]\nrules = [{ tool = 'tool_299', decision = 'allow' }]",
+    )?);
+    let make = || {
+        PolicyGate::new(
+            FixtureGate {
+                calls: Arc::default(),
+            },
+            snapshot.clone(),
+            store.clone(),
+            "large".into(),
+        )
+    };
+    let invocation = parse(
+        &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"tool_299","arguments":{}}}),
+        Direction::Client,
+    )?;
+    let mut partial = make()?;
+    partial
+        .inspect(Direction::Client, &list_page(1, None)?)
+        .await?;
+    partial
+        .inspect(
+            Direction::Server,
+            &page(1, &tools[..256], Some("opaque-token"))?,
+        )
+        .await?;
+    assert!(
+        partial
+            .inspect(Direction::Client, &invocation)
+            .await
+            .is_err()
+    );
+    let mut gate = make()?;
+    gate.inspect(Direction::Client, &list_page(1, None)?)
+        .await?;
+    gate.inspect(
+        Direction::Server,
+        &page(1, &tools[..256], Some("opaque-token"))?,
+    )
+    .await?;
+    gate.inspect(Direction::Client, &list_page(2, Some("opaque-token"))?)
+        .await?;
+    gate.inspect(Direction::Server, &page(2, &tools[256..], None)?)
+        .await?;
+    gate.inspect(Direction::Client, &invocation).await?;
+    let mut changed = tools[256..].to_vec();
+    changed[0]["description"] = json!("synthetic changed instructions");
+    let mut gate = make()?;
+    gate.inspect(Direction::Client, &list_page(1, None)?)
+        .await?;
+    gate.inspect(
+        Direction::Server,
+        &page(1, &tools[..256], Some("fresh-token"))?,
+    )
+    .await?;
+    gate.inspect(Direction::Client, &list_page(2, Some("fresh-token"))?)
+        .await?;
+    assert!(
+        gate.inspect(Direction::Server, &page(2, &changed, None)?)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn pagination_rejects_wrong_or_repeated_cursor_and_duplicate_names() -> Result {
+    let directory = Directory::new()?;
+    let store = BaselineStore::open(&directory.0).await?;
+    let tools = vec![tool("Original")];
+    accept_catalog_pin(&store, "pages:tools-page:1", &tools).await?;
+    accept_catalog_pin(&store, "pages:tools-page:2", &tools).await?;
+    for attack in ["wrong_cursor", "loop", "duplicate"] {
+        let mut gate = PolicyGate::new(
+            FixtureGate {
+                calls: Arc::default(),
+            },
+            policy()?,
+            store.clone(),
+            "pages".into(),
+        )?;
+        gate.inspect(Direction::Client, &list_page(1, None)?)
+            .await?;
+        gate.inspect(Direction::Server, &page(1, &tools, Some("token"))?)
+            .await?;
+        if attack == "wrong_cursor" {
+            assert!(
+                gate.inspect(Direction::Client, &list_page(2, Some("forged"))?)
+                    .await
+                    .is_err()
+            );
+        } else {
+            gate.inspect(Direction::Client, &list_page(2, Some("token"))?)
+                .await?;
+            assert!(
+                gate.inspect(
+                    Direction::Server,
+                    &page(
+                        2,
+                        &tools,
+                        if attack == "loop" {
+                            Some("token")
+                        } else {
+                            None
+                        }
+                    )?
+                )
+                .await
+                .is_err()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn content_policy() -> std::result::Result<Arc<Policy>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(Arc::new(Policy::parse(
+        r#"
+version = "content"
+tools = []
+rules = []
+[[protocol]]
+method = "resources/read"
+target = "fixture://public"
+decision = "allow"
+[[protocol]]
+method = "prompts/list"
+decision = "allow"
+[[protocol]]
+method = "prompts/get"
+target = "summarize"
+decision = "allow"
+"#,
+    )?))
+}
+#[tokio::test]
+async fn resources_and_prompts_require_separate_exact_owner_permissions() -> Result {
+    let directory = Directory::new()?;
+    let store = BaselineStore::open(&directory.0).await?;
+    let snapshot = content_policy()?;
+    let make = || {
+        PolicyGate::new(
+            FixtureGate {
+                calls: Arc::default(),
+            },
+            snapshot.clone(),
+            store.clone(),
+            "content".into(),
+        )
+    };
+    let read = |uri| {
+        parse(
+            &json!({"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":uri}}),
+            Direction::Client,
+        )
+    };
+    for uri in ["fixture://private", "fixture://public/child"] {
+        assert!(
+            make()?
+                .inspect(Direction::Client, &read(uri)?)
+                .await
+                .is_err()
+        );
+    }
+    let mut gate = make()?;
+    gate.inspect(Direction::Client, &read("fixture://public")?)
+        .await?;
+    let response = parse(
+        &json!({"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"fixture://public","text":"public note"}]}}),
+        Direction::Server,
+    )?;
+    gate.inspect(Direction::Server, &response).await?;
+    let mut gate = make()?;
+    gate.inspect(Direction::Client, &read("fixture://public")?)
+        .await?;
+    let wrong = parse(
+        &json!({"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"fixture://private","text":"synthetic private"}]}}),
+        Direction::Server,
+    )?;
+    assert!(gate.inspect(Direction::Server, &wrong).await.is_err());
+    // Listing defaults to deny, even where an individual resource is authorized.
+    let list = parse(
+        &json!({"jsonrpc":"2.0","id":2,"method":"resources/list"}),
+        Direction::Client,
+    )?;
+    assert!(make()?.inspect(Direction::Client, &list).await.is_err());
+    Ok(())
+}
+#[tokio::test]
+async fn prompt_arguments_require_pinned_schema_and_unlisted_arguments_refuse() -> Result {
+    let directory = Directory::new()?;
+    let store = BaselineStore::open(&directory.0).await?;
+    let prompt = json!({"name":"summarize","description":"Summarize public text","arguments":[{"name":"text","required":true}]});
+    let key = clawbell_core::signatures::argument_digest(&json!({"key":"summarize"}))?;
+    accept_catalog_pin(
+        &store,
+        "content:prompts/list",
+        &[json!({"name":key,"inputSchema":{},"metadata":prompt})],
+    )
+    .await?;
+    let request = parse(
+        &json!({"jsonrpc":"2.0","id":1,"method":"prompts/list"}),
+        Direction::Client,
+    )?;
+    let response = parse(
+        &json!({"jsonrpc":"2.0","id":1,"result":{"prompts":[prompt]}}),
+        Direction::Server,
+    )?;
+    for args in [
+        json!({"text":"public"}),
+        json!({}),
+        json!({"text":"public","extra":"unlisted"}),
+    ] {
+        let mut gate = PolicyGate::new(
+            FixtureGate {
+                calls: Arc::default(),
+            },
+            content_policy()?,
+            store.clone(),
+            "content".into(),
+        )?;
+        gate.inspect(Direction::Client, &request).await?;
+        gate.inspect(Direction::Server, &response).await?;
+        let get = parse(
+            &json!({"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"summarize","arguments":args}}),
+            Direction::Client,
+        )?;
+        let result = gate.inspect(Direction::Client, &get).await;
+        assert_eq!(
+            result.is_ok(),
+            args.as_object()
+                .is_some_and(|a| a.len() == 1 && a.contains_key("text"))
+        );
+    }
+    Ok(())
+}

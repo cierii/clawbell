@@ -371,3 +371,110 @@ fn commit_binding() -> clawbell_sandbox::transaction::commit::Binding {
         arguments: [4; 32],
     }
 }
+
+#[tokio::test]
+#[ignore = "requires real Linux namespace and cgroup v2 delegation"]
+async fn skill_snapshot_binds_code_policy_command_and_instructions() -> Result {
+    use clawbell_sandbox::transaction::skill::{ScannedSkill, SkillSpec};
+    let root = std::env::temp_dir().join(format!("clawbell-skill-native-{}", std::process::id()));
+    fs::create_dir(&root)?;
+    fs::write(
+        root.join("entry.py"),
+        "from pathlib import Path\ntry:\n Path('/workspace/entry.py').write_text('changed')\n raise SystemExit(9)\nexcept OSError:\n print('scanned-original', flush=True)\n",
+    )?;
+    let spec = || -> std::result::Result<SkillSpec, clawbell_core::policy::PolicyError> {
+        Ok(SkillSpec {
+        workspace: root.clone(),
+        executable: "/usr/bin/python3".into(),
+        arguments: vec!["-B".into(), "/workspace/entry.py".into()],
+        instructions: "Summarize public notes".into(),
+        policy: clawbell_core::policy::Policy::parse("version='skill'\ntools=[]\nrules=[]\n[skills]\nallow_execution=true\nallow_shell=true\n")?.skill_permission(),
+    })
+    };
+    let scan = ScannedSkill::prepare(spec()?).await?;
+    let digest = scan.digest().to_owned();
+    let binding = scan.instruction_binding();
+    assert!(binding.matches(Some("Summarize public notes")));
+    assert!(!binding.matches(Some("changed instructions")));
+    assert!(!binding.matches(None));
+    for field in ["policy", "command", "instructions"] {
+        let mut changed = spec()?;
+        match field {
+            "policy" => changed.policy = clawbell_core::policy::Policy::parse("version='skill'\ntools=[]\nrules=[]\n[skills]\nallow_execution=true\nallow_shell=true\n# changed\n")?.skill_permission(),
+            "command" => changed.arguments.push("changed".into()),
+            _ => changed.instructions.push('!'),
+        }
+        let changed = ScannedSkill::prepare(changed).await?;
+        assert_ne!(changed.digest(), digest);
+        assert!(
+            changed
+                .into_runner(
+                    &digest,
+                    PathBuf::from("/nonexistent"),
+                    ResourceLimits::default()
+                )
+                .is_err()
+        );
+    }
+    // The source pathname is no longer the executed code after a complete scan.
+    fs::write(
+        root.join("entry.py"),
+        "raise SystemExit('source changed after scan')",
+    )?;
+    let changed = ScannedSkill::prepare(spec()?).await?;
+    assert_ne!(changed.digest(), digest);
+    let parent = PathBuf::from(std::env::var("CLAWBELL_TEST_CGROUP")?);
+    let mut runner = scan.into_runner(&digest, parent, ResourceLimits::default())?;
+    let mut child = runner.spawn().await?;
+    let stdout = child.stdout.take().ok_or("missing stdout")?;
+    let mut lines = BufReader::new(stdout).lines();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await??
+            .as_deref(),
+        Some("scanned-original")
+    );
+    assert!(child.wait().await?.success());
+    runner.terminate().await?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires real Linux namespace and cgroup v2 delegation"]
+async fn native_memory_and_task_exhaustion_stay_in_the_containment_group() -> Result {
+    let root =
+        std::env::temp_dir().join(format!("clawbell-resource-native-{}", std::process::id()));
+    fs::create_dir(&root)?;
+    let parent = PathBuf::from(std::env::var("CLAWBELL_TEST_CGROUP")?);
+    for attack in ["memory", "tasks"] {
+        let code = if attack == "memory" {
+            "a=[]\nwhile True: a.append(bytearray(1024*1024))"
+        } else {
+            "import os,time\nchildren=[]\ntry:\n while True:\n  pid=os.fork()\n  if pid==0: time.sleep(30); os._exit(0)\n  children.append(pid)\nexcept OSError:\n print('task-limit-refused',flush=True)\ntime.sleep(30)"
+        };
+        let mut cfg = config(root.clone(), parent.clone(), vec!["-c".into(), code.into()]);
+        cfg.limits.memory_bytes = 32 * 1024 * 1024;
+        cfg.limits.tasks = 8;
+        cfg.limits.cpu_quota = 10_000;
+        cfg.limits.lifetime = Duration::from_secs(5);
+        let mut runner = NativeRunner::new(cfg)?;
+        let mut child = runner.spawn().await?;
+        if attack == "tasks" {
+            let mut lines = BufReader::new(child.stdout.take().ok_or("missing stdout")?).lines();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+                    .await??
+                    .as_deref(),
+                Some("task-limit-refused")
+            );
+        } else {
+            let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
+            assert!(!status.success());
+        }
+        runner.terminate().await?;
+        tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
+    }
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

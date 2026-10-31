@@ -17,32 +17,14 @@ pub(crate) fn diagnostic(error: &(dyn Error + 'static)) -> String {
     if let Some(clawbell_proxy::Error::Host(host)) = error.downcast_ref::<clawbell_proxy::Error>() {
         return diagnostic(host);
     }
-    let (code, hint) = if let Some(error) = error.downcast_ref::<clawbell_sandbox::LaunchError>() {
-        use clawbell_sandbox::LaunchError as Host;
-        let hint = match error {
-            Host::CgroupUnavailable | Host::ResourceControlsUnavailable => {
-                "provide an owner-delegated cgroups v2 subtree with cpu, memory, pids and cgroup.kill; run clawbell doctor"
-            }
-            Host::BubblewrapUnavailable => {
-                "install bubblewrap at /usr/bin/bwrap with --ro-bind-fd and --disable-userns support"
-            }
-            Host::ProbeFailed | Host::ProbeTimeout | Host::SpawnFailed => {
-                "check unprivileged namespaces, bubblewrap capabilities, seccomp and close_range; run clawbell doctor"
-            }
-            Host::WorkspaceRefused => {
-                "select a readable credential-free directory outside home and credential trees"
-            }
-            Host::RootRefused => "run as the unprivileged workspace owner",
-            Host::ExecutableRefused => "select an executable file under /usr/bin",
-            Host::CleanupFailed => {
-                "stop clients and inspect the delegated process group before restarting"
-            }
-            _ => {
-                "check owner settings and supported Linux isolation prerequisites; run clawbell doctor"
-            }
-        };
-        return format!("{error}: {hint}"); // LaunchError contains only unit variants.
-    } else if let Some(code) = error.downcast_ref::<Code>() {
+    #[cfg(target_os = "linux")]
+    if let Some(message) = skill_diagnostic(error) {
+        return message;
+    }
+    if let Some(host) = error.downcast_ref::<clawbell_sandbox::LaunchError>() {
+        return native_diagnostic(*host);
+    }
+    let (code, hint) = if let Some(code) = error.downcast_ref::<Code>() {
         (
             code.0,
             "review the selected command settings; client configuration and credentials are never printed",
@@ -112,6 +94,44 @@ pub(crate) fn diagnostic(error: &(dyn Error + 'static)) -> String {
         )
     };
     format!("{code}: {hint}")
+}
+
+#[cfg(target_os = "linux")]
+fn skill_diagnostic(error: &(dyn Error + 'static)) -> Option<String> {
+    let error = error.downcast_ref::<clawbell_sandbox::transaction::TransactionError>()?;
+    if let clawbell_sandbox::transaction::TransactionError::Isolation(host) = error {
+        return Some(diagnostic(host));
+    }
+    Some(format!(
+        "{error}: review the exact skill scan, explicit skill/shell policy grants and native snapshot prerequisites"
+    ))
+}
+
+fn native_diagnostic(error: clawbell_sandbox::LaunchError) -> String {
+    use clawbell_sandbox::LaunchError as Host;
+    let hint = match error {
+        Host::CgroupUnavailable | Host::ResourceControlsUnavailable => {
+            "provide an owner-delegated cgroups v2 subtree with cpu, memory, pids and cgroup.kill; run clawbell doctor"
+        }
+        Host::BubblewrapUnavailable => {
+            "install bubblewrap at /usr/bin/bwrap with --ro-bind-fd and --disable-userns support"
+        }
+        Host::ProbeFailed | Host::ProbeTimeout | Host::SpawnFailed => {
+            "check unprivileged namespaces, bubblewrap capabilities, seccomp and close_range; run clawbell doctor"
+        }
+        Host::WorkspaceRefused => {
+            "select a readable credential-free directory outside home and credential trees"
+        }
+        Host::RootRefused => "run as the unprivileged workspace owner",
+        Host::ExecutableRefused => "select an executable file under /usr/bin",
+        Host::CleanupFailed => {
+            "stop clients and inspect the delegated process group before restarting"
+        }
+        _ => {
+            "check owner settings and supported Linux isolation prerequisites; run clawbell doctor"
+        }
+    };
+    format!("{error}: {hint}") // LaunchError contains only unit variants.
 }
 
 #[cfg(test)]

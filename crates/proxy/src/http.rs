@@ -1,15 +1,16 @@
-//! Stateless Streamable HTTP upstream: one POST per message, JSON or finite SSE.
-//! No redirects, ambient proxies, cookies, retries, session IDs or GET replay.
+//! Bounded Streamable HTTP upstream. Session identity is scoped to one relay;
+//! redirects, automatic retry/replay and interactive reverse requests are denied.
 use crate::{
     Direction, Envelope, Error, Gate, Limits,
     stdio::{self, Wire},
 };
 use futures_util::StreamExt;
 use reqwest::{
-    Client, Url,
+    Method,
     header::{ACCEPT, CONTENT_TYPE},
+    header::{HeaderMap, HeaderValue},
 };
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::mpsc,
@@ -19,8 +20,14 @@ use tokio::{
 /// Owner-configured endpoint with DNS pinned to checked socket addresses.
 /// It intentionally cannot be constructed from server/tool output.
 pub struct Target {
-    client: Client,
-    url: Url,
+    endpoint: crate::network::Endpoint,
+    session: tokio::sync::Mutex<HttpSession>,
+    stateful: bool,
+}
+#[derive(Default)]
+struct HttpSession {
+    initialized: bool,
+    id: Option<String>,
 }
 impl Target {
     /// Resolve once and pin every connection address. Private addresses require
@@ -34,50 +41,21 @@ impl Target {
         private_exception: Option<IpAddr>,
         limits: Limits,
     ) -> Result<Self, Error> {
-        let limits = limits.validate()?;
-        let url = Url::parse(url).map_err(|_| Error::Denied)?;
-        if !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(Error::Denied);
+        Ok(Self {
+            endpoint: crate::network::Endpoint::connect(url, private_exception, limits).await?,
+            session: tokio::sync::Mutex::new(HttpSession::default()),
+            stateful: false,
+        })
+    }
+    /// Enable session-aware Streamable HTTP on an owner-configured broker endpoint.
+    /// OAuth credentials remain in that endpoint, never JSON-RPC or sandbox env.
+    #[must_use]
+    pub fn streamable(endpoint: crate::network::Endpoint) -> Self {
+        Self {
+            endpoint,
+            session: tokio::sync::Mutex::new(HttpSession::default()),
+            stateful: true,
         }
-        let host = url.host_str().ok_or(Error::Denied)?;
-        let port = url.port_or_known_default().ok_or(Error::Denied)?;
-        let addresses: Vec<SocketAddr> = tokio::time::timeout(
-            limits.request_timeout,
-            tokio::net::lookup_host((host, port)),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(|_| Error::Transport)?
-        .collect();
-        if addresses.is_empty() || addresses.len() > 32 {
-            return Err(Error::Denied);
-        }
-        for address in &addresses {
-            let ip = address.ip();
-            if forbidden(ip)
-                || (!public(ip) && private_exception != Some(ip))
-                || (url.scheme() != "https"
-                    && !(url.scheme() == "http"
-                        && ip.is_loopback()
-                        && private_exception == Some(ip)))
-            {
-                return Err(Error::Denied);
-            }
-        }
-        let client = Client::builder()
-            .no_proxy()
-            .retry(reqwest::retry::never())
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve_to_addrs(host, &addresses)
-            .timeout(limits.request_timeout)
-            .connect_timeout(limits.request_timeout)
-            .build()
-            .map_err(|_| Error::Transport)?;
-        Ok(Self { client, url })
     }
     async fn post(&self, wire: Wire, limits: Limits) -> Result<Vec<Vec<u8>>, Error> {
         let message = Envelope::parse(&wire.bytes, Direction::Client, limits.message_bytes)?;
@@ -86,20 +64,30 @@ impl Target {
         } else {
             None
         };
-        let mut request = self
-            .client
-            .post(self.url.clone())
-            .header(ACCEPT, "application/json, text/event-stream")
-            .header(CONTENT_TYPE, "application/json")
-            .body(wire.bytes);
+        let initializing = message.method() == Some("initialize");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(version) = wire.version {
-            request = request.header("MCP-Protocol-Version", version);
+            headers.insert(
+                "mcp-protocol-version",
+                HeaderValue::from_str(&version).map_err(|_| Error::Protocol)?,
+            );
         }
-        let response = request.send().await.map_err(|_| Error::Transport)?;
-        // Stateful upstreams require a different adapter; never drop session identity silently.
-        if response.headers().contains_key("mcp-session-id") {
-            return Err(Error::Protocol);
+        if let Some(id) = &self.session.lock().await.id {
+            headers.insert(
+                "mcp-session-id",
+                HeaderValue::from_str(id).map_err(|_| Error::Protocol)?,
+            );
         }
+        let response = self
+            .endpoint
+            .send(Method::POST, headers, wire.bytes, limits)
+            .await?;
+        self.accept_session(&response, initializing).await?;
         if request_id.is_none() {
             if response.status() != reqwest::StatusCode::ACCEPTED {
                 return Err(Error::Protocol);
@@ -124,10 +112,16 @@ impl Target {
             .unwrap_or("")
             .trim()
             .to_owned();
-        let body = bounded_body(response, limits).await?;
         let messages = match content_type.as_str() {
-            "application/json" => vec![body],
-            "text/event-stream" => parse_sse(&body, limits)?,
+            "application/json" => vec![bounded_body(response, limits).await?],
+            "text/event-stream" => {
+                response_events(
+                    response,
+                    request_id.as_ref().ok_or(Error::Protocol)?,
+                    limits,
+                )
+                .await?
+            }
             _ => return Err(Error::Protocol),
         };
         let mut found = false;
@@ -151,44 +145,44 @@ impl Target {
         }
         Ok(messages)
     }
-}
-fn forbidden(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => {
-            v == std::net::Ipv4Addr::new(100, 100, 100, 200)
-                || v.is_link_local()
-                || v.is_unspecified()
-                || v.is_multicast()
-                || v.is_broadcast()
+    async fn accept_session(
+        &self,
+        response: &reqwest::Response,
+        initializing: bool,
+    ) -> Result<(), Error> {
+        let returned_session = response
+            .headers()
+            .get("mcp-session-id")
+            .map(|value| {
+                let value = value.to_str().map_err(|_| Error::Protocol)?;
+                if value.is_empty()
+                    || value.len() > 256
+                    || !value.bytes().all(|c| (0x21..=0x7e).contains(&c))
+                {
+                    return Err(Error::Protocol);
+                }
+                Ok(value.to_owned())
+            })
+            .transpose()?;
+        {
+            let mut session = self.session.lock().await;
+            if initializing {
+                if session.initialized || (!self.stateful && returned_session.is_some()) {
+                    return Err(Error::Protocol);
+                }
+                session.initialized = true;
+                session.id = returned_session;
+            } else if returned_session.is_some() && returned_session != session.id {
+                return Err(Error::Protocol);
+            }
         }
-        IpAddr::V6(v) => {
-            v.to_ipv4_mapped().is_some()
-                || v.is_unspecified()
-                || v.is_multicast()
-                || (v.segments()[0] & 0xffc0 == 0xfe80)
-        }
+        Ok(())
     }
 }
-fn public(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => {
-            !(v.is_private()
-                || v.is_loopback()
-                || v.is_documentation()
-                || v.octets()[0] == 0
-                || v.octets()[0] >= 224
-                || (v.octets()[0] == 192 && v.octets()[1] == 0)
-                || (v.octets()[0] == 198 && (18..=19).contains(&v.octets()[1]))
-                || (v.octets()[0] == 100 && (64..128).contains(&v.octets()[1])))
-        }
-        IpAddr::V6(v) => {
-            !v.is_loopback()
-                && v.segments()[0] & 0xe000 == 0x2000
-                && v.segments()[0..2] != [0x2001, 0xdb8]
-        }
-    }
-}
-async fn bounded_body(response: reqwest::Response, limits: Limits) -> Result<Vec<u8>, Error> {
+pub(crate) async fn bounded_body(
+    response: reqwest::Response,
+    limits: Limits,
+) -> Result<Vec<u8>, Error> {
     if response
         .content_length()
         .is_some_and(|n| n > limits.message_bytes as u64)
@@ -205,6 +199,45 @@ async fn bounded_body(response: reqwest::Response, limits: Limits) -> Result<Vec
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+// Stop at a complete correlated response event; an SSE connection need not
+// close. Buffer all preceding events before the gate inspects/discloses anything.
+async fn response_events(
+    response: reqwest::Response,
+    id: &serde_json::Value,
+    limits: Limits,
+) -> Result<Vec<Vec<u8>>, Error> {
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| Error::Transport)?;
+        if bytes.len() + chunk.len() > limits.message_bytes {
+            return Err(Error::Limit);
+        }
+        bytes.extend_from_slice(&chunk);
+        // Only parse the complete event prefix; a trailing partial event is not
+        // disclosed, interpreted or carried over to another request.
+        let end = (0..bytes.len()).rev().find_map(|n| {
+            if bytes[..=n].ends_with(b"\n\n")
+                || bytes[..=n].ends_with(b"\r\n\r\n")
+                || bytes[..=n].ends_with(b"\r\r")
+            {
+                Some(n + 1)
+            } else {
+                None
+            }
+        });
+        if let Some(end) = end {
+            let messages = parse_sse(&bytes[..end], limits)?;
+            for message in &messages {
+                let envelope = Envelope::parse(message, Direction::Server, limits.message_bytes)?;
+                if envelope.method().is_none() && envelope.id() == Some(id) {
+                    return Ok(messages);
+                }
+            }
+        }
+    }
+    Err(Error::Protocol)
 }
 fn parse_sse(bytes: &[u8], limits: Limits) -> Result<Vec<Vec<u8>>, Error> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::InvalidMessage)?;
@@ -238,11 +271,11 @@ fn parse_sse(bytes: &[u8], limits: Limits) -> Result<Vec<Vec<u8>>, Error> {
     Ok(messages)
 }
 
-/// Bridge a client STDIO stream to an owner-approved stateless HTTP endpoint.
+/// Bridge client STDIO to an owner-approved HTTP endpoint.
 /// Every response is buffered and inspected; partial data is never forwarded.
 ///
 /// # Errors
-/// Rejects stateful upstreams and reverse requests, denial, overflow and timeouts.
+/// Rejects unauthorized session changes/reverse requests, denial, overflow and timeouts.
 pub async fn relay<R, W, G>(
     read: R,
     write: W,
@@ -312,9 +345,92 @@ mod tests {
     #[test]
     fn metadata_and_mapped_addresses_are_refused() -> Result<(), Box<dyn std::error::Error>> {
         for ip in ["169.254.169.254", "::ffff:127.0.0.1", "fe80::1", "0.0.0.0"] {
-            assert!(forbidden(ip.parse()?));
+            assert!(crate::network::forbidden(ip.parse()?));
         }
-        assert!(!public("127.0.0.1".parse()?));
+        assert!(!crate::network::public("127.0.0.1".parse()?));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+    #[tokio::test]
+    async fn stateful_sse_response_finishes_without_eof_and_session_header_is_scoped() -> Result {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}/mcp", listener.local_addr()?);
+        let endpoint =
+            crate::network::Endpoint::connect(&url, Some("127.0.0.1".parse()?), Limits::default())
+                .await?;
+        let target = Target::streamable(endpoint);
+        let server = tokio::spawn(async move {
+            for initialization in [true, false] {
+                let (stream, _) = listener.accept().await?;
+                let mut reader = BufReader::new(stream);
+                let mut length = 0;
+                let mut session = None;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await?;
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse::<usize>()?;
+                        }
+                        if key.eq_ignore_ascii_case("mcp-session-id") {
+                            session = Some(value.trim().to_owned());
+                        }
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await?;
+                if initialization {
+                    assert!(session.is_none());
+                    let response = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+                    // No Content-Length, no EOF: completion is the JSON-RPC event.
+                    reader.get_mut().write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nMcp-Session-Id: synthetic-session\r\n\r\n{response}").as_bytes()).await?;
+                    // Keep the first response open while accepting the next POST.
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        drop(reader);
+                    });
+                } else {
+                    assert_eq!(session.as_deref(), Some("synthetic-session"));
+                    reader.get_mut().write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+                }
+            }
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}});
+        let messages = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            target.post(
+                Wire {
+                    bytes: serde_json::to_vec(&init)?,
+                    version: None,
+                },
+                Limits::default(),
+            ),
+        )
+        .await??;
+        assert_eq!(messages.len(), 1);
+        target
+            .post(
+                Wire {
+                    bytes: serde_json::to_vec(
+                        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                    )?,
+                    version: Some("2025-06-18".into()),
+                },
+                Limits::default(),
+            )
+            .await?;
+        server.await??;
         Ok(())
     }
 }

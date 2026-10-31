@@ -659,3 +659,82 @@ async fn approved_baseline(
     }
     Ok(store)
 }
+
+#[tokio::test]
+#[ignore = "explicit release latency experiment"]
+async fn remote_resource_gate_packets_under_five_ms() -> Result<()> {
+    let dir = Directory::new()?;
+    let policy = Arc::new(Policy::parse(
+        "version='remote-benchmark'\ntools=[]\nrules=[]\n[[protocol]]\nmethod='resources/read'\ntarget='fixture://public'\ndecision='allow'\n",
+    )?);
+    let bearer = clawbell_proxy::network::Bearer::new(
+        "synthetic-registered-bearer-value".into(),
+        std::time::Duration::from_secs(60),
+    )?;
+    let mut proxy = compose_remote(
+        policy,
+        BaselineStore::open(&dir.0).await?,
+        OperationStore::open(&dir.0, "b".repeat(64)).await?,
+        "remote-benchmark".into(),
+        Some(&bearer),
+    )?;
+    assert!(proxy.permits_remote());
+    let mut samples = Vec::new();
+    for id in 0..2200 {
+        let request = packet(
+            &json!({"jsonrpc":"2.0","id":id,"method":"resources/read","params":{"uri":"fixture://public"}}),
+            Direction::Client,
+        )?;
+        let response = packet(
+            &json!({"jsonrpc":"2.0","id":id,"result":{"contents":[{"uri":"fixture://public","text":"synthetic public text"}]}}),
+            Direction::Server,
+        )?;
+        for (direction, message) in [(Direction::Client, request), (Direction::Server, response)] {
+            let start = std::time::Instant::now();
+            let message = Envelope::parse(&message.encode()?, direction, 1024 * 1024)?;
+            proxy.inspect(direction, &message).await?.encode()?;
+            if id >= 200 {
+                samples.push(start.elapsed());
+            }
+        }
+    }
+    samples.sort_unstable();
+    let max = *samples.last().ok_or("no samples")?;
+    eprintln!(
+        "Remote resource policy/DLP/durable audit: {} packets, p99 {:?}, max {:?}",
+        samples.len(),
+        samples[samples.len() * 99 / 100],
+        max
+    );
+    assert!(max < std::time::Duration::from_millis(5));
+    proxy.finish().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn remote_credentials_are_registered_before_response_and_never_restored() -> Result<()> {
+    let dir = Directory::new()?;
+    let policy = Arc::new(Policy::parse(
+        "version='remote-dlp'\ntools=[]\nrules=[]\n[[protocol]]\nmethod='resources/read'\ntarget='fixture://public'\ndecision='allow'\n",
+    )?);
+    let secret = "synthetic-registered-OAuth-value";
+    let bearer =
+        clawbell_proxy::network::Bearer::new(secret.into(), std::time::Duration::from_secs(60))?;
+    let mut proxy = compose_remote(
+        policy,
+        BaselineStore::open(&dir.0).await?,
+        OperationStore::open(&dir.0, "c".repeat(64)).await?,
+        "remote-dlp".into(),
+        Some(&bearer),
+    )?;
+    proxy.inspect(Direction::Client,&packet(&json!({"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"fixture://public"}}),Direction::Client)?).await?;
+    let masked=proxy.inspect(Direction::Server,&packet(&json!({"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"fixture://public","text":secret}]}}),Direction::Server)?).await?;
+    assert!(!String::from_utf8(masked.encode()?)?.contains(secret));
+    let forged = packet(
+        &json!({"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":secret}}),
+        Direction::Client,
+    )?;
+    assert!(proxy.inspect(Direction::Client, &forged).await.is_err());
+    proxy.finish().await?;
+    Ok(())
+}

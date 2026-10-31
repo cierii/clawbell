@@ -11,6 +11,7 @@ pub struct LocalVaultGate<G> {
     vault: Option<Vault>,
     tools: Vec<String>,
     limit: usize,
+    remote: bool,
 }
 impl<G: Gate> LocalVaultGate<G> {
     /// Construct for one local upstream, with an explicit restoration allowlist.
@@ -24,7 +25,32 @@ impl<G: Gate> LocalVaultGate<G> {
             vault: Some(Vault::new(limit).map_err(|_| Error::Refused(Reason::DlpDenied))?),
             tools,
             limit,
+            remote: false,
         })
+    }
+    /// Build a remote DLP boundary with no secret-restoration capability. Register
+    /// an adapter-held OAuth credential before inspecting any upstream output.
+    /// # Errors
+    /// Refuses entropy/registration failures or an inner local-only gate.
+    pub fn for_remote(
+        inner: G,
+        bearer: Option<&crate::network::Bearer>,
+        limit: usize,
+    ) -> Result<Self, Error> {
+        if !inner.permits_remote() {
+            return Err(Error::Denied);
+        }
+        let mut result = Self::new(inner, Vec::new(), limit)?;
+        if let Some(bearer) = bearer {
+            result
+                .vault
+                .as_mut()
+                .ok_or(Error::Denied)?
+                .register(bearer.value())
+                .map_err(|_| Error::Refused(Reason::DlpDenied))?;
+        }
+        result.remote = true;
+        Ok(result)
     }
 }
 /// Non-string scalars cannot hold a marker without changing JSON semantics.
@@ -194,7 +220,7 @@ fn transform(
 }
 impl<G: Gate> Gate for LocalVaultGate<G> {
     fn permits_remote(&self) -> bool {
-        false
+        self.remote && self.inner.permits_remote()
     }
     async fn inspect(
         &mut self,
@@ -226,7 +252,11 @@ impl<G: Gate> Gate for LocalVaultGate<G> {
             })?;
             // Session-random markers cannot participate in a persistent pin.
             // Refuse secret-bearing catalogs before the first baseline write.
-            if message.value().pointer("/result/tools").is_some() && value != *message.value() {
+            if ["tools", "resources", "resourceTemplates", "prompts"]
+                .iter()
+                .any(|key| message.value().pointer(&format!("/result/{key}")).is_some())
+                && value != *message.value()
+            {
                 return Err(Error::Refused(Reason::CatalogDenied));
             }
             let redacted = Envelope::parse(

@@ -1,7 +1,7 @@
 # clawbell
 
-A local Rust MCP firewall with a reversible client installer and an offline skill
-inspector. The Linux MVP launches **local stdio servers** through policy checks,
+A local Rust MCP firewall with a reversible client installer, scan-bound skill
+runner and explicit remote HTTP relay. Linux launches **local stdio servers** through policy checks,
 pinned tool schemas, session DLP, durable SQLite audit and native containment.
 It runs without cloud telemetry. It is a conservative security boundary, not a
 claim to recognize every malicious instruction or arbitrary encoded secret.
@@ -165,6 +165,113 @@ other encodings and Unicode confusables are not comprehensively recognized.
 Ordinary encoded data and URLs may produce false positives. A clean report never
 grants execution permission; skills outside the controlled runner are unprotected.
 
+## Remote Streamable HTTP and protocol operations
+
+Remote upstreams run on their own hosts; clawbell controls traffic, not their
+process isolation. Start a separate owner-authorized session manually (the
+installer still handles only local stdio):
+
+```bash
+clawbell proxy-http --url https://mcp.example.com/mcp \
+  --policy /absolute/path/policy.toml \
+  --state-dir /absolute/path/private-state --server reviewed-remote
+```
+
+The egress broker binds the exact scheme/host/port/path and checked DNS addresses,
+verifies TLS and the connected peer, and refuses every redirect or automatic retry.
+No ambient proxy, cookies or credentials from the sandbox are used. An exact
+`--private-ip` exception is available for one address at that URL/port; plain HTTP
+is restricted to explicit loopback and cannot carry OAuth credentials. The sandbox
+itself remains disconnected; this is not a general forward proxy for skill code.
+
+For a pre-registered OAuth public client, add the following flags to proxy-http:
+
+```bash
+--oauth-login --oauth-client-id public-client-id \
+--oauth-authorization-url https://issuer.example.com/authorize \
+--oauth-token-url https://issuer.example.com/token --oauth-scope mcp
+```
+
+Open the login URL printed to stderr. The provider must accept loopback ephemeral
+callback ports. PKCE S256, one-use state, a five-minute login deadline and an exact
+resource indicator bind the exchange. Token requests use pinned egress; access
+tokens stay in host memory and are registered with DLP before responses are shown.
+The bearer expires monotonically and is injected only at the exact HTTPS resource.
+No credentials are printed to stdout, placed in CLI arguments or saved to disk.
+No discovery, dynamic registration, refresh or automatic replay after 401 exists;
+expired tokens require a new explicit login/session.
+
+JSON responses, accepted notifications, POST SSE without waiting for EOF and
+session IDs are supported. Wrong IDs, session changes and reverse requests refuse.
+GET streams, SSE resume/replay and session DELETE are not implemented. Servers
+requiring those optional facilities are unsupported.
+
+[protocol-example.toml](policies/protocol-example.toml) shows separate resources
+and prompts permissions. resources/read and prompts/get match an exact URI/name;
+a listing or URI template never grants retrieval permission. Lists are pinned
+before publication. Prompt arguments must match the pinned definition; resource
+contents must carry the requested URI. Text-only DLP remains mandatory. Resource
+subscriptions, list-change notifications, binary content and pagination of these
+two metadata catalogs currently refuse. require_approval for protocol rules also
+refuses; the interactive approval monitor currently handles tools only.
+
+Tool catalogs support nextCursor across at most 64 pages, 4096 tools and 8 MiB in
+total, with the existing per-message limit. No call runs before the full catalog,
+schemas and aggregate pin pass. Each exposed page also needs an owner-reviewed
+pin: first discovery may require successive review/reconnect cycles for pages and
+the aggregate. Changed page partitioning may require review. Repeated/wrong
+cursors, duplicate names, empty nonterminal pages and exhausted bounds refuse.
+
+## Execute a reviewed skill snapshot (Linux)
+
+Use an unpacked UTF-8 package and a file containing the exact expected
+initialize.instructions. Execution requires both explicit owner policy grants:
+
+```toml
+[skills]
+allow_execution = true
+allow_shell = true
+```
+
+Arbitrary interpreter code can launch a shell inside containment; static inspection
+cannot prove its absence. Both grants default to false, and even a matching scan
+cannot bypass them. Review this scope before enabling it. Scan the exact command
+and owner policy first:
+
+```bash
+clawbell skill-scan --workspace /absolute/path/package \
+  --policy /absolute/path/policy.toml --instructions-file /absolute/path/instructions.txt \
+  -- /usr/bin/python3 -B /workspace/server.py
+```
+
+Review the package and indexed findings. An empty report does not prove safety.
+Use its digest only after deliberate owner review:
+
+```bash
+clawbell proxy --workspace /absolute/path/package \
+  --policy /absolute/path/policy.toml --state-dir /absolute/path/private-state \
+  --cgroup-parent /sys/fs/cgroup/your-persistent-delegation --server reviewed-skill \
+  --skill-scan-digest '<reviewed-64-hex-digest>' \
+  --skill-instructions-file /absolute/path/instructions.txt \
+  -- /usr/bin/python3 -B /workspace/server.py
+```
+
+Launch repeats the complete scan and binds package paths, types, permissions and
+bytes, exact command/arguments, instructions and exact policy fingerprint. Even
+a same-version policy edit invalidates the digest. Execution uses the privately
+frozen read-only tmpfs snapshot; subsequent source edits cannot replace it.
+initialize.instructions must match the scan before and after DLP; absence, drift
+or secret redaction closes the session before disclosure. Hardlinks, symlinks,
+special nodes, binary files and incomplete scans refuse. Native network isolation,
+resource limits, lifetime, bounded stdio, policy and durable audit stay mandatory.
+System interpreters/libraries remain trusted runtime dependencies. The content hash
+is reusable scan evidence, not an execution grant or an operation approval.
+
+macOS and Windows native execution remain **unfinished and fail closed**. The new
+AArch64 CI job exercises Linux containment; its results must be checked separately.
+See [ADR 0013](docs/adr/0013-broker-protocol-and-scanned-skills.md) for trust boundaries,
+compatibility, explicit unsupported features and verification limits.
+
 ## Security composition
 
 `clawbell proxy --help` exposes the launcher used by `init`. Each session has an
@@ -175,11 +282,12 @@ approval and allow; unknown tools/effects/paths deny. Agent-memory writes includ
 The example policy is owner configuration, not an upstream annotation.
 
 The launcher explicitly allows initialization, ping, tool enumeration, policy-gated
-tool calls and cancellation. Resources, prompts, sampling, elicitation, reverse
-capabilities and other notifications deny; injected resources are stopped before
-retrieval. `require_approval` uses the optional `proxy --monitor-socket PATH`
+tool calls and cancellation. Resources and prompts require separate exact owner
+protocol rules; without them retrieval denies. Sampling, elicitation, reverse
+capabilities and other notifications deny. `require_approval` uses the optional `proxy --monitor-socket PATH`
 endpoint; without a connected owner it denies. `clawbell monitor --socket PATH`
-connects that owner-private IPC endpoint. There is no web panel, HTTP listener or token initialization in this MVP.
+connects that owner-private IPC endpoint. There is no web panel or general HTTP listener. Explicit OAuth login uses a temporary
+loopback callback; it never exposes a tool-execution HTTP endpoint.
 
 Tool catalogs use persistent owner-reviewed pins covering names, descriptions,
 schemas and metadata. First observation and changed catalogs stage a hash-only
@@ -333,7 +441,7 @@ A failed budget must fail release checks, never trigger a weaker durability mode
 
 GitHub Actions runs format/lint/tests/build, a pinned checksum-verified gitleaks
 history/index scan, production gate latency and native Linux enforcement on
-ephemeral hosted runners. Native CI builds pinned bubblewrap 0.12.0 and provisions
+ephemeral hosted x86-64 and AArch64 Linux runners. Native CI builds pinned bubblewrap 0.12.0 and provisions
 namespace/cgroup prerequisites; unavailable facilities fail the job. A `v0.1.0` tag
 publishes a checksummed Linux x86-64 archive only after both jobs pass. No tag is
 created by `init`, and dependencies/skills never auto-update. Git ignores runtime

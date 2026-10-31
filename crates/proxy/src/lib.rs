@@ -15,13 +15,19 @@
 //! }
 //! ```
 
+#[cfg(unix)]
+mod content;
 pub mod dlp;
 pub mod http;
 #[cfg(unix)]
 pub mod monitor;
+pub mod network;
+pub mod oauth;
 #[cfg(unix)]
 pub mod policy;
 pub mod protocol;
+#[cfg(target_os = "linux")]
+pub mod skill;
 pub mod stdio;
 
 use std::{future::Future, time::Duration};

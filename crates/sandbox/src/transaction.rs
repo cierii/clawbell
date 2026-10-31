@@ -5,6 +5,7 @@
 //! budgets, and withhold results until `Transaction::inspect` succeeds. Reports
 //! contain untrusted private paths; do not log or serialize them without redaction.
 pub mod commit;
+pub mod skill;
 
 use crate::{LaunchError, Runner, linux::LinuxRunner, native::NativeConfig, sys};
 use std::{
@@ -34,6 +35,12 @@ pub enum Effect {
 /// Fixed errors deliberately omit filenames, contents and operating-system text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TransactionError {
+    /// Invocation, policy, instructions or package differ from the prior scan.
+    #[error("skill_scan_binding_mismatch")]
+    ScanBinding,
+    /// Arbitrary skill code requires explicit execution and shell grants.
+    #[error("skill_execution_permission_required")]
+    SkillExecutionDenied,
     /// Native containment failed.
     #[error(transparent)]
     Isolation(#[from] LaunchError),

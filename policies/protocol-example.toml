@@ -1,0 +1,26 @@
+# Explicit examples; replace synthetic resource identities with reviewed targets.
+version = "protocol-example-v1"
+tools = []
+rules = []
+
+[[protocol]]
+method = "resources/list"
+decision = "allow"
+
+[[protocol]]
+method = "resources/templates/list"
+decision = "allow"
+
+[[protocol]]
+method = "resources/read"
+target = "fixture://public"
+decision = "allow"
+
+[[protocol]]
+method = "prompts/list"
+decision = "allow"
+
+[[protocol]]
+method = "prompts/get"
+target = "summarize"
+decision = "allow"

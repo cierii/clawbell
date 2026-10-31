@@ -102,7 +102,7 @@ impl BaselineStore {
         digest: [u8; 32],
         tools: Vec<[u8; 32]>,
     ) -> Result<(), BaselineError> {
-        if server.is_empty() || server.len() > 512 || tools.len() > 256 {
+        if server.is_empty() || server.len() > 512 || tools.len() > 4096 {
             return Err(BaselineError);
         }
         let (answer, result) = oneshot::channel();

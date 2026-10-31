@@ -24,5 +24,8 @@ libc = "0.2"
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 
+reqwest.workspace = true
+zeroize = "1"
+
 [lints]
 workspace = true

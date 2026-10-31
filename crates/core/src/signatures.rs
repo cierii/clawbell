@@ -12,7 +12,7 @@ pub struct CatalogError;
 /// # Errors
 /// Rejects duplicate/missing names, invalid schemas and oversized catalogs.
 pub fn catalog_digest(tools: &[Value]) -> Result<[u8; 32], CatalogError> {
-    if tools.len() > 256 {
+    if tools.len() > 4096 {
         return Err(CatalogError);
     }
     let mut sorted = BTreeMap::new();
@@ -30,7 +30,7 @@ pub fn catalog_digest(tools: &[Value]) -> Result<[u8; 32], CatalogError> {
         }
     }
     let encoded = serde_json::to_vec(&sorted).map_err(|_| CatalogError)?;
-    if encoded.len() > 1024 * 1024 {
+    if encoded.len() > 8 * 1024 * 1024 {
         return Err(CatalogError);
     }
     Ok(Sha256::digest([b"clawbell/catalog/v1\0".as_slice(), &encoded].concat()).into())
@@ -68,4 +68,19 @@ pub fn argument_digest(arguments: &Value) -> Result<String, CatalogError> {
         let _ = write!(result, "{byte:02x}");
     }
     Ok(result)
+}
+
+/// Domain-separated persistent identity for a resource/prompt catalog or tool
+/// page. This avoids aliases between server names, methods and page numbers.
+/// # Errors
+/// Refuses inputs exceeding the bounded canonical argument representation.
+pub fn scoped_catalog_identity(
+    server: &str,
+    method: &str,
+    page: usize,
+) -> Result<String, CatalogError> {
+    Ok(format!(
+        "clawbell.catalog.v1:{}",
+        argument_digest(&serde_json::json!([server, method, page]))?
+    ))
 }

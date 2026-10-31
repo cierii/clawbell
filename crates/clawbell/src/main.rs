@@ -5,7 +5,10 @@ mod errors;
 mod files;
 mod launch;
 mod manage;
+mod remote;
 mod scan;
+#[cfg(target_os = "linux")]
+mod skill_scan;
 use crate::errors::Code;
 use clap::{Parser, Subcommand};
 use clawbell_proxy::monitor::{Command, Event, frame};
@@ -60,6 +63,11 @@ enum Action {
     Scan { path: PathBuf },
     /// Run one local stdio MCP server with mandatory policy, audit and containment.
     Proxy(launch::Options),
+    /// Relay stdio to an owner-pinned remote Streamable HTTP MCP endpoint.
+    ProxyHttp(remote::Options),
+    /// Scan exact skill code, invocation, policy and initialization instructions.
+    #[cfg(target_os = "linux")]
+    SkillScan(skill_scan::Options),
     /// Validate owner policy without executing any tools.
     Policy {
         #[command(subcommand)]
@@ -142,6 +150,9 @@ async fn dispatch(action: Action) -> files::Result<i32> {
             println!("policy_valid");
         }
         Action::Proxy(options) => launch::run(options).await?,
+        Action::ProxyHttp(options) => remote::run(options).await?,
+        #[cfg(target_os = "linux")]
+        Action::SkillScan(options) => skill_scan::run(options).await?,
         Action::Init {
             config,
             policy,

@@ -9,16 +9,25 @@ use clawbell_core::{
 };
 use serde_json::Value;
 static SESSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 /// A session-local security decorator. Inner Gate still supplies durable intent /
 /// outcome audit and DLP. Construct a fresh instance for every upstream session.
 pub struct PolicyGate<G> {
     inner: G,
+    content: crate::content::ContentPolicy,
     policy: Arc<Policy>,
     store: BaselineStore,
     server: String,
     list_id: Option<Value>,
+    pages: Vec<Value>,
+    cursor: Option<String>,
+    cursors: HashSet<String>,
+    page_count: usize,
+    catalog_bytes: usize,
     schemas: HashMap<String, jsonschema::Validator>,
     pinned: bool,
     closed: bool,
@@ -35,15 +44,21 @@ impl<G: Gate> PolicyGate<G> {
         store: BaselineStore,
         server: String,
     ) -> Result<Self, Error> {
-        if server.is_empty() || server.len() > 512 {
+        if server.is_empty() || server.len() > 460 || server.starts_with("clawbell.catalog.v1:") {
             return Err(Error::Denied);
         }
         Ok(Self {
             inner,
+            content: crate::content::ContentPolicy::default(),
             policy,
             store,
             server,
             list_id: None,
+            pages: Vec::new(),
+            cursor: None,
+            cursors: HashSet::new(),
+            page_count: 0,
+            catalog_bytes: 0,
             schemas: HashMap::new(),
             pinned: false,
             closed: false,
@@ -114,6 +129,9 @@ impl<G: Gate> PolicyGate<G> {
         if self.closed {
             return Err(Error::Refused(Reason::CatalogDenied));
         }
+        self.content
+            .check(&self.policy, &self.store, &self.server, direction, message)
+            .await?;
         if direction == Direction::Server
             && message.method() == Some("notifications/tools/list_changed")
         {
@@ -124,9 +142,17 @@ impl<G: Gate> PolicyGate<G> {
         if direction == Direction::Client {
             match message.method() {
                 Some("tools/list") => {
-                    if self.list_id.is_some() || message.value().pointer("/params/cursor").is_some()
+                    let cursor = message.value().pointer("/params/cursor");
+                    if self.list_id.is_some()
+                        || cursor.map(Value::as_str) != self.cursor.as_deref().map(Some)
                     {
                         return Err(Error::Refused(Reason::CatalogDenied));
+                    }
+                    if cursor.is_none() {
+                        self.pages.clear();
+                        self.cursors.clear();
+                        self.page_count = 0;
+                        self.catalog_bytes = 0;
                     }
                     self.list_id = Some(
                         message
@@ -159,47 +185,95 @@ impl<G: Gate> PolicyGate<G> {
             .as_ref()
             .is_some_and(|id| Some(id) == message.id())
         {
-            let result = message
-                .value()
-                .get("result")
-                .ok_or(Error::Refused(Reason::CatalogDenied))?;
-            if result.get("nextCursor").is_some() {
-                return Err(Error::Refused(Reason::CatalogDenied));
-            }
-            let tools = result
-                .get("tools")
-                .and_then(Value::as_array)
-                .ok_or(Error::Refused(Reason::CatalogDenied))?;
-            let digest =
-                catalog_digest(tools).map_err(|_| Error::Refused(Reason::CatalogDenied))?;
-            let signatures =
-                tool_digests(tools).map_err(|_| Error::Refused(Reason::CatalogDenied))?;
-            let mut schemas = HashMap::new();
-            for tool in tools {
-                let name = tool
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or(Error::Refused(Reason::CatalogDenied))?;
-                let schema = tool
-                    .get("inputSchema")
-                    .ok_or(Error::Refused(Reason::CatalogDenied))?;
-                let compiled = jsonschema::options()
-                    .offline()
-                    .with_pattern_options(
-                        jsonschema::PatternOptions::regex().size_limit(1024 * 1024),
-                    )
-                    .build(schema)
-                    .map_err(|_| Error::Refused(Reason::SchemaDenied))?;
-                schemas.insert(name.into(), compiled);
-            }
+            self.catalog_page(message).await?;
+        }
+        Ok(())
+    }
+    async fn catalog_page(&mut self, message: &Envelope) -> Result<(), Error> {
+        let result = message
+            .value()
+            .get("result")
+            .ok_or(Error::Refused(Reason::CatalogDenied))?;
+        let next = result
+            .get("nextCursor")
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 1024)
+                    .map(str::to_owned)
+                    .ok_or(Error::Refused(Reason::CatalogDenied))
+            })
+            .transpose()?;
+        if next
+            .as_ref()
+            .is_some_and(|s| !self.cursors.insert(s.clone()))
+        {
+            return Err(Error::Refused(Reason::CatalogDenied));
+        }
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or(Error::Refused(Reason::CatalogDenied))?;
+        self.page_count += 1;
+        self.catalog_bytes += message.encode()?.len();
+        if self.page_count > 64
+            || self.catalog_bytes > 8 * 1024 * 1024
+            || self.pages.len() + tools.len() > 4096
+            || (next.is_some() && tools.is_empty())
+        {
+            return Err(Error::Refused(Reason::CatalogDenied));
+        }
+        // Every exposed page is independently owner-pinned. Cursors are
+        // opaque session tokens, never authority or persistent identities.
+        if next.is_some() || self.page_count > 1 {
             self.store
-                .check(&self.server, digest, signatures)
+                .check(
+                    &clawbell_core::signatures::scoped_catalog_identity(
+                        &self.server,
+                        "tools/list",
+                        self.page_count,
+                    )
+                    .map_err(|_| Error::Denied)?,
+                    catalog_digest(tools).map_err(|_| Error::Refused(Reason::CatalogDenied))?,
+                    tool_digests(tools).map_err(|_| Error::Refused(Reason::CatalogDenied))?,
+                )
                 .await
                 .map_err(|_| Error::Refused(Reason::CatalogDenied))?;
-            self.schemas = schemas;
-            self.pinned = true;
-            self.list_id = None;
         }
+        self.pages.extend_from_slice(tools);
+        // Also reject duplicates across page boundaries before exposing one.
+        catalog_digest(&self.pages).map_err(|_| Error::Refused(Reason::CatalogDenied))?;
+        self.cursor = next;
+        self.list_id = None;
+        if self.cursor.is_some() {
+            return Ok(());
+        }
+        let tools = &self.pages;
+        let digest = catalog_digest(tools).map_err(|_| Error::Refused(Reason::CatalogDenied))?;
+        let signatures = tool_digests(tools).map_err(|_| Error::Refused(Reason::CatalogDenied))?;
+        let mut schemas = HashMap::new();
+        for tool in tools {
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or(Error::Refused(Reason::CatalogDenied))?;
+            let schema = tool
+                .get("inputSchema")
+                .ok_or(Error::Refused(Reason::CatalogDenied))?;
+            let compiled = jsonschema::options()
+                .offline()
+                .with_pattern_options(jsonschema::PatternOptions::regex().size_limit(1024 * 1024))
+                .build(schema)
+                .map_err(|_| Error::Refused(Reason::SchemaDenied))?;
+            schemas.insert(name.into(), compiled);
+        }
+        self.store
+            .check(&self.server, digest, signatures)
+            .await
+            .map_err(|_| Error::Refused(Reason::CatalogDenied))?;
+        self.schemas = schemas;
+        self.pinned = true;
+        self.list_id = None;
+        self.pages.clear();
         Ok(())
     }
 }
@@ -216,7 +290,11 @@ impl<G: Gate> Gate for PolicyGate<G> {
         direction: Direction,
         message: &Envelope,
     ) -> Result<Envelope, Error> {
-        let immutable = message.method() == Some("tools/call")
+        let immutable = message.method().is_some_and(|m| {
+            m == "tools/call" || m.starts_with("resources/") || m.starts_with("prompts/")
+        }) || ["resources", "resourceTemplates", "prompts"]
+            .iter()
+            .any(|key| message.value().pointer(&format!("/result/{key}")).is_some())
             || (direction == Direction::Server
                 && self
                     .list_id

@@ -1,3 +1,98 @@
+# Handoff — 2026-10-31: pinned HTTP, protocol catalogs and scanned Linux skills
+
+## Result and remaining scope
+
+The requested expansion is partially delivered. Implemented: exact-endpoint HTTP
+egress with DNS/peer pins, host-only expiring OAuth bearer credentials and
+pre-registered PKCE login, a session-aware bounded POST JSON/SSE relay, explicit
+resources/prompts policy and metadata pins, nextCursor tool catalogs above 256,
+and a private read-only Linux skill snapshot bound to a prior scan and exact
+initialize.instructions. Native Linux AArch64 CI was added alongside x86-64.
+
+macOS and Windows native isolation are NOT implemented. NativeRunner continues to
+refuse those platforms; no sandbox bypass was added. They need actual backend
+implementation plus native limit, escape, filesystem and lifecycle testing before
+this user task can be declared fully complete. Do not report ARM CI configuration
+as a passed ARM execution test. The sandbox remains network-disconnected; egress
+is a trusted host HTTP adapter, not a generic network exception for skill code.
+
+HTTP/OAuth compatibility is intentionally bounded: no GET/resume/DELETE/replay,
+protected-resource discovery, dynamic registration, refresh or credential
+persistence. Resource/prompt catalogs currently refuse nextCursor; tool catalogs
+support it. Protocol require_approval refuses; the monitor authorizes tools only.
+These constraints, trust boundaries, migration and commands are in README and
+ADR 0013. They must remain visible when describing production compatibility.
+
+## Implementation
+
+- Core: explicit protocol rules, opaque skill execution/shell permission bound to
+  exact policy bytes; catalog/tool bounds raised to 4096 and 8 MiB; hashed scoped
+  catalog identities preserve server/method/page separation and existing pins.
+- Proxy: one pinned egress adapter (reqwest/rustls), OAuth2 S256/state/resource
+  binding, optional MCP session identity, finite inspection units on open POST SSE,
+  remote credential registration in DLP with no marker restoration, pinned
+  resource/prompt metadata and arguments, bounded complete tool page collection.
+- Sandbox: scan of UTF-8 package/files, literal arguments and expected instructions;
+  invocation/policy/content digest, frozen tmpfs read-only execution, mandatory
+  explicit execution AND shell permission, existing seccomp/cgroup containment.
+  Static findings are never authorization or proof of safety.
+- CLI: proxy-http with explicit OAuth owner login, skill-scan and scan-bound proxy
+  flags. Existing JSON installer remains local stdio only. No web UI was added.
+- Tests: OAuth binding/refusal, session SSE without EOF, denied destinations and
+  token expiry/audience, 300-tool pages and cursor/metadata attacks, exact protocol
+  grants/URI/prompt arguments, remote credential echo masking, native code source
+  replacement, policy/instruction/command drift, memory/pids exhaustion, CLI skill
+  mismatch/refusal and an additional remote-resource durable-gate latency budget.
+
+Only new direct library is oauth2 5.0 with default HTTP backends disabled and
+timing-resistant secret equality enabled. It supplies reviewed protocol/PKCE/state
+mechanisms instead of custom crypto. Other direct dependencies already existed
+in the lockfile; 7 packages (including oauth2) were added without unrelated upgrades.
+AGENTS.md remains unchanged at 199 lines. The two pre-existing untracked owner
+files docs/audyt-mvp-i-rynku-2026-10-30.md and docs/uruchomienie-mvp.md remain
+untouched and excluded from the commit.
+
+## Verification
+
+- Final scripts/check-release.sh passed: locked fetch, format, all-target Clippy
+  with -D warnings, workspace tests/doc tests, release build, CLI/default-policy
+  smoke checks, all explicit latency budgets, agent-memory protection, delegated
+  native containment, real installer round trip and CLI attack/skill probes.
+- Five native tests passed: source replacement after scan, exact invocation
+  bindings, read-only snapshot writes, memory/task exhaustion and descendant
+  cleanup. Real CLI tests also refused missing explicit skill/shell permission,
+  changed instructions, stale scan digests and package symlinks.
+- 4,000 warmed tool-gate packets: p99 351.967 us, max 599.787 us. 4,000 warmed
+  remote-resource gate packets: p99 301.872 us, max 754.971 us. Native transport
+  2,000 RTTs: max 447.628 us. Full CLI/native/audit/DLP/policy 2,000 RTTs:
+  p99 0.715 ms, max 1.571 ms. Every measured sample was below 5 ms. These are
+  bounded warm workload measurements, not a universal latency guarantee.
+- Added callback-only regression passed after the full release run: exact
+  loopback Host/method/path, duplicate query and Origin refusal, no code echo.
+  Final all-target Clippy and format passed with this additional test as well.
+- Context7 official rmcp, reqwest and oauth2 documentation consulted. Cargo audit
+  fetched the current RustSec database and scanned all 274 locked packages with
+  no reported vulnerabilities. Fetched origin refs/tags; gitleaks scanned all 15
+  existing commits without findings. The exact reviewed index is scanned before
+  commit; detection does not establish exhaustive secret absence or fork erasure.
+- New protocol example policy, command help, Python AST/Bash syntax, changed local
+  documentation links, diff whitespace and scope checked. AGENTS.md remains 199
+  lines. No npm/UI tests apply because no frontend exists or changed.
+
+The ordinary restricted tool environment denied Unix/loopback sockets; checks
+were rerun on the host without weakening product controls. Local environment:
+Rust 1.99.1, bubblewrap 0.12.0, RUSTUP_HOME=/tmp/clawbell-rustup,
+CARGO_HOME=/tmp/clawbell-cargo and the pinned Cargo binaries on PATH.
+
+## Next step
+
+After passing final checks, scan the exact reviewed Git index, commit/push the
+requested change and verify origin/main. Remote CI (especially native AArch64)
+needs its own result; local x86-64 checks cannot certify it. Complete native macOS
+and Windows enforcement in a later platform workstream with suitable native hosts.
+
+---
+
 # Handoff — 2026-10-31: approved file publication and recovery
 
 Delivered the opt-in Linux transaction library committer. `inspect_for_commit`
