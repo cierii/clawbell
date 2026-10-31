@@ -48,6 +48,8 @@ impl Outcome {
 /// Payload-free reason shared by policy, inspection and transport boundaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
+    /// Successful owner-local self-test linked by digest to this MCP session.
+    ContainmentEvidence,
     /// Stable `unspecified` reason.
     Unspecified,
     /// Remote composition failed before any MCP exchange.
@@ -114,6 +116,7 @@ impl Reason {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::ContainmentEvidence => "containment_evidence",
             Self::Unspecified => "unspecified",
             Self::RemoteInitialization => "remote_initialization_failed",
             Self::EndpointInitialization => "endpoint_initialization_failed",

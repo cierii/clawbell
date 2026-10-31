@@ -8,7 +8,7 @@
 /ui/test-results/
 
 # Local runtime data and secrets
-/.local/
+.local/
 *.db
 *.db-shm
 *.db-wal

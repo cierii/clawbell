@@ -40,6 +40,9 @@ pub async fn run(options: Options) -> files::Result<()> {
         ..owner.limits()?
     };
     launch::validate_owner_paths(&owner)?;
+    if owner.doctor_report.is_some() {
+        return Err(Code("doctor_profile_mode_mismatch").into());
+    }
     if owner.skill_scan_digest.is_some() || owner.skill_instructions_file.is_some() {
         return Err(Code("transaction_skill_mode_unsupported").into());
     }

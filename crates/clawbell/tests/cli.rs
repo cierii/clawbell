@@ -101,8 +101,12 @@ fn init_fake_cgroup_refuses_without_binding_backups_or_upstream_execution() -> R
 
 #[test]
 fn diagnostics_fail_closed_without_real_delegation() -> Result {
+    let root = std::env::temp_dir().join(format!("clawbell-cli-doctor-{}", std::process::id()));
+    fs::create_dir(&root)?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
     for command in ["doctor", "demo"] {
         let output = Command::new(env!("CARGO_BIN_EXE_clawbell"))
+            .current_dir(&root)
             .args([
                 command,
                 "--cgroup-parent",
@@ -115,6 +119,15 @@ fn diagnostics_fail_closed_without_real_delegation() -> Result {
         assert!(stderr.starts_with("host_cgroup_unavailable:"));
         assert!(!stderr.contains("nonexistent-synthetic"));
     }
+    let reports = root.join(".local/clawbell/doctor");
+    let report = fs::read_dir(&reports)?
+        .next()
+        .ok_or("failed report missing")??
+        .path();
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(report)?)?;
+    assert_eq!(report["self_test_passed"], false);
+    assert_eq!(report["profile"]["profile_unavailable"], true);
+    fs::remove_dir_all(root)?;
     Ok(())
 }
 

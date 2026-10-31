@@ -25,6 +25,18 @@ use zeroize::Zeroizing;
 
 #[derive(clap::Args)]
 pub struct Options {
+    /// Maximum idle time with no outstanding request (seconds).
+    #[arg(long, default_value_t = 600)]
+    pub idle_timeout_secs: u64,
+    /// Request/inspection/I/O deadline (seconds, at most 300).
+    #[arg(long, default_value_t = 30)]
+    pub request_timeout_secs: u64,
+    /// Absolute session lifetime (seconds, at most 86400).
+    #[arg(long, default_value_t = 3600)]
+    pub session_lifetime_secs: u64,
+    /// Optional owner-private IPC socket; monitor failure closes the session.
+    #[arg(long)]
+    pub monitor_socket: Option<PathBuf>,
     /// Exact owner-authorized upstream URL (scheme, hostname, port and path).
     #[arg(long)]
     pub url: String,
@@ -49,6 +61,18 @@ pub struct Options {
     pub oauth_client_id: Option<String>,
     #[arg(long, requires = "oauth_login")]
     pub oauth_scope: Vec<String>,
+}
+
+impl Options {
+    pub(crate) fn limits(&self) -> std::result::Result<Limits, clawbell_proxy::Error> {
+        Limits {
+            idle_timeout: Duration::from_secs(self.idle_timeout_secs),
+            request_timeout: Duration::from_secs(self.request_timeout_secs),
+            session_lifetime: Duration::from_secs(self.session_lifetime_secs),
+            ..Limits::default()
+        }
+        .validate()
+    }
 }
 
 // One local loopback callback, no cookies or token persistence. State+PKCE protect
@@ -150,7 +174,12 @@ async fn login(options: &Options, limits: Limits) -> Result<Option<Bearer>> {
     Ok(Some(flow.complete(code, &state, limits).await?))
 }
 pub async fn run(options: Options) -> Result<()> {
-    let limits = Limits::default();
+    let limits = options.limits()?;
+    let endpoint_path = options.monitor_socket.clone();
+    if let Some(path) = &endpoint_path {
+        files::trusted(path.parent().ok_or(Code("monitor_parent_required"))?)?;
+    }
+    let monitor = clawbell_proxy::monitor::Monitor::new()?;
     files::trusted(&options.state_dir)?;
     files::trusted(
         options
@@ -200,6 +229,7 @@ pub async fn run(options: Options) -> Result<()> {
             store.clone(),
             identity,
             bearer.as_ref(),
+            endpoint_path.as_ref().map(|_| monitor.clone()),
         )?;
         stage = Reason::OAuthInitialization;
         let endpoint = match bearer {
@@ -207,12 +237,12 @@ pub async fn run(options: Options) -> Result<()> {
             None => endpoint,
         };
         stage = Reason::Unspecified;
-        let result = relay(
-            tokio::io::stdin(),
-            tokio::io::stdout(),
-            Target::streamable(endpoint),
+        let result = monitored_relay(
+            endpoint,
             &mut gate,
             limits,
+            &monitor,
+            endpoint_path.as_deref(),
         )
         .await;
         match result {
@@ -239,6 +269,41 @@ pub async fn run(options: Options) -> Result<()> {
         ),
     };
     store.record_reason(launch, outcome, reason).await?;
+    result
+}
+
+async fn monitored_relay(
+    endpoint: Endpoint,
+    gate: &mut impl clawbell_proxy::Gate,
+    limits: Limits,
+    monitor: &clawbell_proxy::monitor::Monitor,
+    path: Option<&std::path::Path>,
+) -> std::result::Result<(), clawbell_proxy::Error> {
+    let (result, monitor_failed) = {
+        let session = relay(
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+            Target::streamable(endpoint),
+            gate,
+            limits,
+        );
+        let server = async {
+            if let Some(path) = path {
+                monitor.serve(path).await
+            } else {
+                std::future::pending().await
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = server => (Err(clawbell_proxy::Error::Denied), true),
+            result = session => (result, false),
+        }
+    };
+    if monitor_failed {
+        gate.terminated(Reason::InspectionDenied).await?;
+        gate.finish().await?;
+    }
     result
 }
 
@@ -271,6 +336,10 @@ mod tests {
                 std::fs::create_dir(root.join("tool-baselines.sqlite3"))?;
             }
             let options = Options {
+                idle_timeout_secs: 600,
+                request_timeout_secs: 30,
+                session_lifetime_secs: 3600,
+                monitor_socket: None,
                 url: url.into(),
                 private_ip: Some("127.0.0.1".parse()?),
                 policy,

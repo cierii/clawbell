@@ -800,3 +800,229 @@ async fn prompt_arguments_require_pinned_schema_and_unlisted_arguments_refuse() 
     }
     Ok(())
 }
+
+struct CountAll(Arc<AtomicUsize>);
+impl Gate for CountAll {
+    fn inspect(
+        &mut self,
+        _: Direction,
+        packet: &Envelope,
+    ) -> impl std::future::Future<Output = std::result::Result<Envelope, Error>> + Send {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        std::future::ready(Ok(packet.clone()))
+    }
+    fn finish(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::result::Result<(), Error>> + Send {
+        std::future::ready(Ok(()))
+    }
+}
+
+async fn protocol_approval_gate(
+    method: &str,
+    directory: &Directory,
+    monitor: clawbell_proxy::monitor::Monitor,
+    calls: Arc<AtomicUsize>,
+) -> std::result::Result<PolicyGate<CountAll>, Box<dyn std::error::Error + Send + Sync>> {
+    let target = match method {
+        "resources/read" => "target='fixture://public'\n",
+        "prompts/get" => "target='summarize'\n",
+        _ => "",
+    };
+    let snapshot = Arc::new(Policy::parse(&format!(
+        "version='protocol-approval'\ntools=[]\nrules=[]\n[[protocol]]\nmethod='{method}'\n{target}decision='require_approval'\n[[protocol]]\nmethod='prompts/list'\ndecision='allow'\n"
+    ))?);
+    let store = BaselineStore::open(&directory.0).await?;
+    let mut gate = PolicyGate::new(
+        CountAll(calls),
+        snapshot,
+        store.clone(),
+        "protocol-approval".into(),
+    )?
+    .with_monitor(monitor);
+    if method == "prompts/get" {
+        let prompt = json!({"name":"summarize","arguments":[{"name":"text","required":true}]});
+        let key = clawbell_core::signatures::argument_digest(&json!({"key":"summarize"}))?;
+        let identity = clawbell_core::signatures::scoped_catalog_identity(
+            "protocol-approval",
+            "prompts/list",
+            0,
+        )?;
+        accept_catalog_pin(
+            &store,
+            &identity,
+            &[json!({"name":key,"inputSchema":{},"metadata":prompt})],
+        )
+        .await?;
+        gate.inspect(
+            Direction::Client,
+            &parse(
+                &json!({"jsonrpc":"2.0","id":1,"method":"prompts/list"}),
+                Direction::Client,
+            )?,
+        )
+        .await?;
+        gate.inspect(
+            Direction::Server,
+            &parse(
+                &json!({"jsonrpc":"2.0","id":1,"result":{"prompts":[prompt]}}),
+                Direction::Server,
+            )?,
+        )
+        .await?;
+    }
+    Ok(gate)
+}
+
+async fn next_approval(
+    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    buffer: &mut Vec<u8>,
+) -> std::result::Result<clawbell_proxy::monitor::Event, Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        let event: clawbell_proxy::monitor::Event = serde_json::from_slice(
+            &tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                clawbell_proxy::monitor::frame(reader, buffer),
+            )
+            .await??,
+        )?;
+        if event.id != 0 {
+            return Ok(event);
+        }
+    }
+}
+
+#[tokio::test]
+async fn protocol_approvals_are_exact_one_use_and_denial_never_forwards() -> Result {
+    use clawbell_proxy::monitor::{Command, Event, Monitor, frame};
+    use tokio::{
+        io::{AsyncWriteExt, BufReader},
+        net::UnixStream,
+    };
+    for method in [
+        "resources/read",
+        "resources/list",
+        "prompts/get",
+        "prompts/list",
+    ] {
+        for allow in [true, false] {
+            let directory = Directory::new()?;
+            let monitor = Monitor::new()?;
+            let socket = directory.0.join("protocol.sock");
+            let serving = monitor.clone();
+            let endpoint = socket.clone();
+            let server = tokio::spawn(async move { serving.serve(&endpoint).await });
+            for _ in 0..1000 {
+                if socket.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            let stream = UnixStream::connect(&socket).await?;
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut buffer = Vec::new();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut gate =
+                protocol_approval_gate(method, &directory, monitor, calls.clone()).await?;
+            calls.store(0, Ordering::Relaxed);
+            // Receiving initial telemetry synchronizes the owner subscription.
+            let _: Event = serde_json::from_slice(&frame(&mut reader, &mut buffer).await?)?;
+            let params = match method {
+                "resources/read" => json!({"uri":"fixture://public"}),
+                "prompts/get" => json!({"name":"summarize","arguments":{"text":"public"}}),
+                _ => json!({}),
+            };
+            let request = parse(
+                &json!({"jsonrpc":"2.0","id":2,"method":method,"params":params}),
+                Direction::Client,
+            )?;
+            let waiting = tokio::spawn(async move {
+                let result = gate.inspect(Direction::Client, &request).await;
+                (gate, result)
+            });
+            let event = next_approval(&mut reader, &mut buffer).await?;
+            let preview: Value = serde_json::from_str(&event.display)?;
+            assert_eq!(preview["method"], method);
+            assert_eq!(preview["params"], params);
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+            let mut reply = serde_json::to_vec(&Command {
+                id: event.id,
+                allow,
+            })?;
+            reply.push(b'\n');
+            write.write_all(&reply).await?;
+            let (mut gate, result) = waiting.await?;
+            assert_eq!(result.is_ok(), allow);
+            assert_eq!(calls.load(Ordering::Relaxed), usize::from(allow));
+            if allow {
+                // The old answer cannot authorize another request, even identical params.
+                let again = parse(
+                    &json!({"jsonrpc":"2.0","id":3,"method":method,"params":params}),
+                    Direction::Client,
+                )?;
+                let waiting =
+                    tokio::spawn(async move { gate.inspect(Direction::Client, &again).await });
+                let next = next_approval(&mut reader, &mut buffer).await?;
+                assert_ne!(next.id, event.id);
+                write.write_all(&reply).await?;
+                drop(write);
+                drop(reader);
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
+                        .await??
+                        .is_err()
+                );
+                assert_eq!(calls.load(Ordering::Relaxed), 1);
+            }
+            server.abort();
+            let _ = server.await;
+            assert!(
+                !socket.exists(),
+                "normal cancellation must reclaim its endpoint"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn protocol_approval_without_owner_and_explicit_deny_never_forward() -> Result {
+    for deny in [false, true] {
+        let directory = Directory::new()?;
+        let extra = if deny {
+            "[[protocol]]\nmethod='resources/read'\ntarget='fixture://public'\ndecision='deny'\n"
+        } else {
+            ""
+        };
+        let policy = Arc::new(Policy::parse(&format!(
+            "version='deny'\ntools=[]\nrules=[]\n[[protocol]]\nmethod='resources/read'\ntarget='fixture://public'\ndecision='require_approval'\n{extra}"
+        ))?);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut gate = PolicyGate::new(
+            CountAll(calls.clone()),
+            policy,
+            BaselineStore::open(&directory.0).await?,
+            "deny".into(),
+        )?;
+        let request = parse(
+            &json!({"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"fixture://public"}}),
+            Direction::Client,
+        )?;
+        let error = gate
+            .inspect(Direction::Client, &request)
+            .await
+            .err()
+            .ok_or("expected refusal")?;
+        assert_eq!(
+            error.reason(),
+            if deny {
+                clawbell_proxy::Reason::MethodDenied
+            } else {
+                clawbell_proxy::Reason::ApprovalRequired
+            }
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+    Ok(())
+}

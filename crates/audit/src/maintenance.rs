@@ -75,6 +75,15 @@ pub fn export(
     limit: u32,
     output: &mut dyn Write,
 ) -> Result<(), AuditError> {
+    export_page(directory, after, limit, output).map(|_| ())
+}
+
+fn export_page(
+    directory: &Path,
+    after: i64,
+    limit: u32,
+    output: &mut dyn Write,
+) -> Result<i64, AuditError> {
     if after < 0 || limit == 0 || limit > 100_000 {
         return Err(AuditError);
     }
@@ -110,13 +119,56 @@ pub fn export(
             })
         })
         .map_err(|_| AuditError)?;
-    for row in rows {
-        let event = row.map_err(|_| AuditError)?;
+    let events = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AuditError)?;
+    // Release the read transaction before potentially slow output can block writers.
+    drop(stmt);
+    drop(connection);
+    let mut cursor = after;
+    for event in events {
         serde_json::to_writer(&mut *output, &event).map_err(|_| AuditError)?;
         output.write_all(b"\n").map_err(|_| AuditError)?;
+        cursor = event.id;
     }
-    Ok(())
+    Ok(cursor)
 }
+/// Bounded live reader. Its shared maintenance lease prevents offline rotation
+/// from changing the cursor generation; concurrent operation writers remain allowed.
+pub struct Follower {
+    _lease: File,
+    directory: std::path::PathBuf,
+    cursor: i64,
+    limit: u32,
+}
+impl Follower {
+    /// Start after an exclusive row cursor, without creating a database/session.
+    /// # Errors
+    /// Refuses invalid bounds, missing storage or active exclusive maintenance.
+    pub fn new(directory: &Path, after: i64, limit: u32) -> Result<Self, AuditError> {
+        if after < 0 || limit == 0 || limit > 1000 {
+            return Err(AuditError);
+        }
+        let lease = storage::lock(directory, "operations.lock", false).map_err(|_| AuditError)?;
+        reader(directory)?;
+        Ok(Self {
+            _lease: lease,
+            directory: directory.to_owned(),
+            cursor: after,
+            limit,
+        })
+    }
+    /// Write at most one page and flush it before advancing the cursor.
+    /// # Errors
+    /// Storage/output failure ends the follow session; no events are replayed.
+    pub fn poll(&mut self, output: &mut dyn Write) -> Result<(), AuditError> {
+        let next = export_page(&self.directory, self.cursor, self.limit, output)?;
+        output.flush().map_err(|_| AuditError)?;
+        self.cursor = next;
+        Ok(())
+    }
+}
+
 // Only the fixed payload-free audit schema is exportable; no SQL or dynamic
 // column selection comes from the owner CLI or an upstream message.
 #[derive(Serialize)]
@@ -206,6 +258,38 @@ mod tests {
     use super::*;
     use crate::operations::{OperationStore, Outcome};
     use std::os::unix::fs::PermissionsExt;
+    #[tokio::test]
+    async fn live_follow_pages_without_duplicates_and_blocks_rotation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("clawbell-follow-{}", std::process::id()));
+        std::fs::create_dir(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        assert!(Follower::new(&dir, 0, 1).is_err());
+        let store = OperationStore::open(&dir, "a".repeat(64)).await?;
+        let first = store.record(0, Outcome::Intent).await?;
+        let mut follower = Follower::new(&dir, first, 1)?;
+        let mut output = Vec::new();
+        follower.poll(&mut output)?;
+        assert_eq!(output, [] as [u8; 0]);
+        let second = store.record(first, Outcome::Response).await?;
+        store.record(0, Outcome::Intent).await?;
+        follower.poll(&mut output)?;
+        let event: serde_json::Value = serde_json::from_slice(&output)?;
+        assert_eq!(event["id"], second);
+        output.clear();
+        follower.poll(&mut output)?;
+        assert_ne!(output, [] as [u8; 0]);
+        output.clear();
+        follower.poll(&mut output)?;
+        assert_eq!(output, [] as [u8; 0]);
+        drop(store);
+        assert!(rotate(&dir).is_err());
+        assert!(Follower::new(&dir, -1, 1).is_err());
+        assert!(Follower::new(&dir, 0, 1001).is_err());
+        drop(follower);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
     #[test]
     fn v2_export_stays_read_only_without_a_binding_column() -> Result<(), Box<dyn std::error::Error>>
     {

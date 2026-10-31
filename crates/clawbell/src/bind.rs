@@ -105,6 +105,14 @@ fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8
         if server_id.len() > 128 {
             return Err(Code("server_identity_limit").into());
         }
+        // Stable per-client/per-server endpoint avoids collisions between bindings.
+        let socket_key = digest(format!("{scope}:{name}").as_bytes());
+        let socket = settings
+            .state_dir
+            .join(format!("monitor-{}.sock", &socket_key[..24]));
+        if text(&socket)?.len() > 107 {
+            return Err(Code("monitor_socket_path_limit").into());
+        }
         let mut wrapped: Vec<String> = [
             "proxy",
             "--policy",
@@ -117,6 +125,8 @@ fn transform(original: &[u8], settings: &Settings, scope: &str) -> Result<Vec<u8
             text(&settings.state_dir)?,
             "--server",
             &server_id,
+            "--monitor-socket",
+            text(&socket)?,
             "--",
             &command,
         ]

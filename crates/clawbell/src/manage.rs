@@ -60,6 +60,9 @@ enum AuditCommand {
     Status,
     /// Print a bounded page of payload-free JSONL events.
     View {
+        /// Continuously print new events until interrupted; prevents offline rotation.
+        #[arg(long)]
+        follow: bool,
         #[arg(long, default_value_t = 0)]
         after: i64,
         #[arg(long, default_value_t = 100)]
@@ -90,7 +93,23 @@ pub fn audit(options: Audit) -> Result<()> {
             }
             println!("{}", serde_json::to_string(&status)?);
         }
-        AuditCommand::View { after, limit } => maintenance::export(
+        AuditCommand::View {
+            after,
+            limit,
+            follow: true,
+        } => {
+            let mut follower = maintenance::Follower::new(&options.state_dir, after, limit)?;
+            let mut output = std::io::stdout().lock();
+            loop {
+                follower.poll(&mut output)?;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+        AuditCommand::View {
+            after,
+            limit,
+            follow: false,
+        } => maintenance::export(
             &options.state_dir,
             after,
             limit,

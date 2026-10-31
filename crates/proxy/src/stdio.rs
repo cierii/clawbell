@@ -149,16 +149,25 @@ pub(crate) async fn drive<G: Gate>(
             let envelope = Envelope::parse(&bytes, direction, limits.message_bytes)?;
             let before = session.deadline().unwrap_or(expires);
             session.accept(direction, &envelope)?;
-            let checked = tokio::time::timeout_at(
+            let inspection = tokio::time::timeout_at(
                 session
                     .deadline()
                     .unwrap_or(expires)
                     .min(before)
                     .min(expires),
                 inspect(gate, direction, &envelope, limits),
-            )
-            .await
-            .map_err(|_| Error::Timeout)??;
+            );
+            // EOF/output failure must cancel a suspended owner decision before
+            // a late reply can enqueue execution on a disconnected session.
+            let checked = tokio::select! {
+                biased;
+                task = tasks.join_next() => return match task {
+                    Some(Ok(Err(error))) => Err(error),
+                    Some(Err(_)) => Err(Error::Transport),
+                    _ => Err(Error::Closed),
+                },
+                result = inspection => result.map_err(|_| Error::Timeout)??,
+            };
             idle = tokio::time::Instant::now() + limits.idle_timeout;
             if terminate_on_cancel
                 && direction == Direction::Client

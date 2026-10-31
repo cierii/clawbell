@@ -2,6 +2,7 @@
 mod bind;
 mod diagnostics;
 mod errors;
+mod evidence;
 mod files;
 mod launch;
 mod manage;
@@ -140,6 +141,8 @@ async fn dispatch(action: Action) -> files::Result<i32> {
             diagnostics::run(diagnostics::Options {
                 cgroup_parent: options.cgroup_parent,
                 self_test: true,
+                report_dir: None,
+                session_lifetime_secs: 3600,
             })
             .await?;
         }
@@ -358,6 +361,54 @@ mod tests {
                 return Err(Code("proxy_required").into());
             };
             assert!(options.limits().is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn http_independent_deadlines_and_monitor_parse_before_network_access()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        for (flag, value, valid) in [
+            ("--idle-timeout-secs", "0", false),
+            ("--request-timeout-secs", "301", false),
+            ("--session-lifetime-secs", "86401", false),
+            ("--request-timeout-secs", "3", true),
+            ("--idle-timeout-secs", "45", true),
+            ("--session-lifetime-secs", "120", true),
+        ] {
+            let cli = Cli::try_parse_from([
+                "clawbell",
+                "proxy-http",
+                "--url",
+                "https://fixture.invalid/mcp",
+                "--policy",
+                "/policy",
+                "--state-dir",
+                "/state",
+                "--server",
+                "synthetic",
+                "--monitor-socket",
+                "/state/http.sock",
+                flag,
+                value,
+            ])?;
+            let Action::ProxyHttp(options) = cli.command else {
+                return Err(Code("http_required").into());
+            };
+            assert_eq!(options.limits().is_ok(), valid);
+            assert_eq!(
+                options.monitor_socket,
+                Some(PathBuf::from("/state/http.sock"))
+            );
+            if valid {
+                let limits = options.limits()?;
+                let configured = match flag {
+                    "--idle-timeout-secs" => limits.idle_timeout,
+                    "--request-timeout-secs" => limits.request_timeout,
+                    _ => limits.session_lifetime,
+                };
+                assert_eq!(configured.as_secs().to_string(), value);
+            }
         }
         Ok(())
     }

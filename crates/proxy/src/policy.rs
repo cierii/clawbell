@@ -129,9 +129,26 @@ impl<G: Gate> PolicyGate<G> {
         if self.closed {
             return Err(Error::Refused(Reason::CatalogDenied));
         }
-        self.content
+        let requires_approval = self
+            .content
             .check(&self.policy, &self.store, &self.server, direction, message)
             .await?;
+        if requires_approval {
+            let params = message
+                .value()
+                .get("params")
+                .cloned()
+                .unwrap_or(Value::Null);
+            self.monitor.as_ref().ok_or(Error::Refused(Reason::ApprovalRequired))?
+                .approve(serde_json::json!({
+                    "session": self.session, "server": self.server,
+                    "method": message.method(), "params": params,
+                    "policy": self.policy.version(),
+                    "arguments_sha256": clawbell_core::signatures::argument_digest(&params).map_err(|_| Error::Denied)?,
+                    "expires_in_seconds": 25,
+                    "scope": "One exact protocol request; remote effects cannot be rolled back"
+                })).await?;
+        }
         if direction == Direction::Server
             && message.method() == Some("notifications/tools/list_changed")
         {

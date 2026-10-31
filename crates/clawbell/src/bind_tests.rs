@@ -54,6 +54,18 @@ fn exact_roundtrip_idempotence_private_backup_and_literal_arguments() -> files::
             .last(),
         Some(&serde_json::json!("literal; $(touch nope)"))
     );
+    let args = value["mcpServers"]["fixture"]["args"]
+        .as_array()
+        .ok_or("args")?;
+    let index = args
+        .iter()
+        .position(|v| v == "--monitor-socket")
+        .ok_or("socket option missing")?;
+    let socket = PathBuf::from(args[index + 1].as_str().ok_or("socket path")?);
+    assert_eq!(socket.parent(), Some(dir.settings().state_dir.as_path()));
+    assert!(socket.file_name().and_then(|s| s.to_str()).is_some_and(
+        |s| s.starts_with("monitor-") && socket.extension().is_some_and(|ext| ext == "sock")
+    ));
     assert_eq!(std::fs::read(dir.0.join("mcp.json.bak"))?, ORIGINAL);
     assert_eq!(
         std::fs::metadata(dir.0.join("mcp.json.bak"))?

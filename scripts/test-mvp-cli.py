@@ -8,6 +8,8 @@ import os
 import pathlib
 import select
 import shutil
+import hashlib
+import sqlite3
 import statistics
 import subprocess
 import tempfile
@@ -54,6 +56,16 @@ tool = "write_file"
 decision = "allow"
 ''')
 
+    # Retained evidence must match the production binary, boot and exact budget.
+    reports = root / "reports"
+    doctor = subprocess.run([str(BINARY), "doctor", "--self-test", "--cgroup-parent", CGROUP,
+                             "--report-dir", str(reports)], capture_output=True, timeout=30)
+    assert doctor.returncode == 0, "self-test must pass on the delegated native host"
+    report = next(reports.glob("doctor-*.json"))
+    report_digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    assert json.loads(report.read_bytes())["self_test_passed"] is True
+    assert report.stat().st_mode & 0o777 == 0o600
+
     # Binding checks real host isolation before modifying any client file. The
     # server is deliberately /usr/bin/false: preflight must run its trusted probe.
     config = root / "mcp.json"
@@ -71,11 +83,12 @@ decision = "allow"
     assert config.read_bytes() == original
     print("Real installer preflight passed without executing the configured upstream; exact config restored.")
 
-    def start():
+    def start(*extra):
         return subprocess.Popen([
             str(BINARY), "proxy", "--policy", str(policy), "--workspace", str(workspace),
             "--cgroup-parent", CGROUP, "--state-dir", str(state), "--server", "synthetic-cli",
-            "--", "/usr/bin/python3", "-B", "/workspace/mvp_mcp.py",
+            "--doctor-report", str(report), "--monitor-socket", str(state / "native.sock"),
+            *extra, "--", "/usr/bin/python3", "-B", "/workspace/mvp_mcp.py",
         ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     def send(peer, message):
@@ -123,6 +136,15 @@ decision = "allow"
         finally:
             finish(peer)
 
+    mismatch = start("--session-lifetime-secs", "3601")
+    try:
+        assert receive(mismatch) is None
+        mismatch.wait(timeout=5)
+        assert mismatch.returncode == 1
+        assert not (state / "operations.sqlite3").exists(), "profile mismatch must refuse before session creation"
+    finally:
+        finish(mismatch)
+
     # First observation refuses forwarding, then the owner reviews/accepts the
     # exact captured candidate. No test deletes or rewrites the pin database.
     peer = start()
@@ -136,7 +158,35 @@ decision = "allow"
     approved = subprocess.run([str(BINARY), "pins", "--state-dir", str(state), "accept", "--review-id", str(candidates[0]["id"]), "--accept"], capture_output=True, timeout=10)
     assert approved.returncode == 0
 
-    # Exercise successful data flow and measure the entire running proxy.
+    # Follow releases SQLite reads before writing output, and pins the generation.
+    with sqlite3.connect(state / "operations.sqlite3") as audit:
+        after = audit.execute("SELECT max(id) FROM events_v1").fetchone()[0]
+    follower = subprocess.Popen([str(BINARY), "audit", "--state-dir", str(state), "view",
+                                 "--follow", "--after", str(after), "--limit", "1"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    try:
+        peer = start()
+        try:
+            assert initialize(peer)["result"]["tools"]
+            assert select.select([follower.stdout], [], [], 5)[0], "follow must flush live rows"
+            line = bytearray()
+            while not line.endswith(b"\n"):
+                line.extend(follower.stdout.read(1))
+            assert json.loads(line)["id"] > after
+        finally:
+            finish(peer)
+        rotation = subprocess.run([str(BINARY), "audit", "--state-dir", str(state), "rotate", "--accept"],
+                                  capture_output=True, timeout=5)
+        assert rotation.returncode != 0, "active follower must protect its cursor generation"
+    finally:
+        follower.terminate()
+        follower.wait(timeout=5)
+        follower.stdout.close()
+        follower.stderr.close()
+
+    # Measure forwarding with monitor publication and a live audit reader active.
+    follower = subprocess.Popen([str(BINARY), "audit", "--state-dir", str(state), "view", "--follow"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     peer = start()
     samples = []
     try:
@@ -153,6 +203,9 @@ decision = "allow"
                 samples.append(elapsed / 1_000_000)
     finally:
         finish(peer)
+    follower.terminate()
+    follower.wait(timeout=5)
+    follower.stderr.close()
     print(f"Full CLI/native/audit/DLP/policy RTT: n={len(samples)}, "
           f"p99={statistics.quantiles(samples, n=100)[98]:.3f} ms, max={max(samples):.3f} ms")
     assert max(samples) < 5, "full warmed RTT exceeds 5 ms release budget"
@@ -169,3 +222,10 @@ decision = "allow"
     finally:
         finish(peer)
     print("Five real CLI attack scenarios refused; synthetic host data and agent memory unchanged.")
+
+    with sqlite3.connect(state / "operations.sqlite3") as audit:
+        evidence = audit.execute("SELECT lower(hex(binding_sha256)) FROM events_v1 WHERE reason='containment_evidence'").fetchall()
+        sessions = audit.execute("SELECT count(*) FROM sessions_v1").fetchone()[0]
+        assert len(evidence) == sessions
+        assert all(row[0] == report_digest for row in evidence)
+    print("Retained self-test evidence linked to every MCP session; live audit and monitor cleanup verified.")

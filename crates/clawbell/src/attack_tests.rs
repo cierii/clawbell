@@ -677,6 +677,7 @@ async fn remote_resource_gate_packets_under_five_ms() -> Result<()> {
         OperationStore::open(&dir.0, "b".repeat(64)).await?,
         "remote-benchmark".into(),
         Some(&bearer),
+        None,
     )?;
     assert!(proxy.permits_remote());
     let mut samples = Vec::new();
@@ -726,6 +727,7 @@ async fn remote_credentials_are_registered_before_response_and_never_restored() 
         OperationStore::open(&dir.0, "c".repeat(64)).await?,
         "remote-dlp".into(),
         Some(&bearer),
+        None,
     )?;
     proxy.inspect(Direction::Client,&packet(&json!({"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"fixture://public"}}),Direction::Client)?).await?;
     let masked=proxy.inspect(Direction::Server,&packet(&json!({"jsonrpc":"2.0","id":1,"result":{"contents":[{"uri":"fixture://public","text":secret}]}}),Direction::Server)?).await?;

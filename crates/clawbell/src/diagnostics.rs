@@ -17,6 +17,12 @@ pub struct Options {
     /// Exercise read/write/socket refusal, descendant cleanup and audit loss.
     #[arg(long)]
     pub self_test: bool,
+    /// Private retained report directory (default: .local/clawbell/doctor).
+    #[arg(long, requires = "self_test")]
+    pub report_dir: Option<PathBuf>,
+    /// Containment lifetime to attest; must match proxy's session lifetime.
+    #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..=86400))]
+    pub session_lifetime_secs: u64,
 }
 #[derive(clap::Args)]
 pub struct DemoOptions {
@@ -43,6 +49,47 @@ fn temporary() -> Result<Temporary> {
 }
 /// A failed prerequisite or probe is an error, never a skipped/pass result.
 pub async fn run(options: Options) -> Result<()> {
+    let limits = ResourceLimits {
+        lifetime: Duration::from_secs(options.session_lifetime_secs),
+        ..ResourceLimits::default()
+    };
+    let before = if options.self_test {
+        match crate::evidence::profile(&options.cgroup_parent, limits) {
+            Ok(profile) => Some(profile),
+            Err(error) => {
+                crate::evidence::persist(
+                    options
+                        .report_dir
+                        .as_deref()
+                        .unwrap_or(std::path::Path::new(".local/clawbell/doctor")),
+                    &serde_json::json!({"profile_unavailable":true}),
+                    false,
+                )?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    let result = probe(&options, limits).await;
+    if let Some(profile) = before {
+        let unchanged = crate::evidence::profile(&options.cgroup_parent, limits)
+            .is_ok_and(|current| current == profile);
+        crate::evidence::persist(
+            options
+                .report_dir
+                .as_deref()
+                .unwrap_or(std::path::Path::new(".local/clawbell/doctor")),
+            &profile,
+            result.is_ok() && unchanged,
+        )?;
+        if !unchanged {
+            return Err(Code("probe_profile_changed").into());
+        }
+    }
+    result
+}
+async fn probe(options: &Options, limits: ResourceLimits) -> Result<()> {
     let root = temporary()?;
     let workspace = root.0.join("workspace");
     std::fs::create_dir(&workspace)?;
@@ -51,7 +98,7 @@ pub async fn run(options: Options) -> Result<()> {
         cgroup_parent: options.cgroup_parent.clone(),
         executable: "/usr/bin/python3".into(),
         arguments,
-        limits: ResourceLimits::default(),
+        limits,
     };
     NativeRunner::preflight(config(Vec::new())).await?;
     println!("native_prerequisites: passed");

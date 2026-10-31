@@ -43,6 +43,25 @@ pub struct Monitor {
     state: Arc<Mutex<State>>,
     events: broadcast::Sender<Event>,
 }
+// Remove only the socket inode created by this service, including cancellation.
+// A pre-existing endpoint is never adopted; crash leftovers require owner cleanup.
+struct SocketGuard {
+    path: std::path::PathBuf,
+    device: u64,
+    inode: u64,
+}
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if let Ok(meta) = std::fs::symlink_metadata(&self.path)
+            && meta.file_type().is_socket()
+            && meta.dev() == self.device
+            && meta.ino() == self.inode
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
 impl Monitor {
     /// Create bounded state with a dedicated session-scoped display redactor.
     /// # Errors
@@ -141,8 +160,9 @@ impl Monitor {
         }
     }
     /// Serve one owner connection at a time in an existing private 0700 directory.
-    /// Existing sockets are never removed or replaced. Restart requires explicit
-    /// owner cleanup. Peer UID and filesystem ownership must both match.
+    /// Existing sockets are never removed or replaced. Normal shutdown removes
+    /// this service's socket; crash leftovers require explicit owner cleanup.
+    /// Peer UID and filesystem ownership must both match.
     /// # Errors
     /// Returns sanitized I/O errors for unsafe paths, disconnects or framing faults.
     pub async fn serve(&self, path: &Path) -> Result<(), Error> {
@@ -153,6 +173,12 @@ impl Monitor {
             return Err(Error::Denied);
         }
         let listener = UnixListener::bind(path).map_err(|_| Error::Denied)?;
+        let socket_meta = std::fs::symlink_metadata(path).map_err(|_| Error::Denied)?;
+        let _cleanup = SocketGuard {
+            path: path.to_owned(),
+            device: socket_meta.dev(),
+            inode: socket_meta.ino(),
+        };
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .map_err(|_| Error::Denied)?;
         loop {

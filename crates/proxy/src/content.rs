@@ -15,6 +15,8 @@ pub(crate) struct ContentPolicy {
     prompts: HashMap<String, Vec<(String, bool)>>,
 }
 impl ContentPolicy {
+    // True means this validated immutable request still needs owner consent.
+    // The caller must not invoke its execution/audit-intent adapter before consent.
     pub(crate) async fn check(
         &mut self,
         policy: &Policy,
@@ -22,15 +24,15 @@ impl ContentPolicy {
         server: &str,
         direction: Direction,
         message: &Envelope,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         if direction == Direction::Client {
             let Some(method) = message
                 .method()
                 .filter(|m| m.starts_with("resources/") || m.starts_with("prompts/"))
             else {
-                return Ok(());
+                return Ok(false);
             };
-            self.request(policy, message, method)?;
+            return self.request(policy, message, method);
         } else if message.method().is_some_and(|m| {
             m.starts_with("notifications/resources/") || m.starts_with("notifications/prompts/")
         }) {
@@ -38,10 +40,10 @@ impl ContentPolicy {
         } else if message.method().is_none() {
             let id = message.id().ok_or(Error::Protocol)?.to_string();
             let Some((method, target)) = self.pending.remove(&id) else {
-                return Ok(());
+                return Ok(false);
             };
             if message.value().get("error").is_some() {
-                return Ok(());
+                return Ok(false);
             }
             let result = message.value().get("result").ok_or(Error::Protocol)?;
             let (field, key) = match method.as_str() {
@@ -62,12 +64,12 @@ impl ContentPolicy {
                     {
                         return Err(Error::Protocol);
                     }
-                    return Ok(());
+                    return Ok(false);
                 }
                 "prompts/get" => {
                     serde_json::from_value::<rmcp::model::GetPromptResult>(result.clone())
                         .map_err(|_| Error::Protocol)?;
-                    return Ok(());
+                    return Ok(false);
                 }
                 _ => return Err(Error::Denied),
             };
@@ -113,9 +115,14 @@ impl ContentPolicy {
                 self.prompts = prompts;
             }
         }
-        Ok(())
+        Ok(false)
     }
-    fn request(&mut self, policy: &Policy, message: &Envelope, method: &str) -> Result<(), Error> {
+    fn request(
+        &mut self,
+        policy: &Policy,
+        message: &Envelope,
+        method: &str,
+    ) -> Result<bool, Error> {
         let target = match method {
             "resources/read" => Some(
                 message
@@ -133,7 +140,8 @@ impl ContentPolicy {
             ),
             _ => None,
         };
-        if policy.evaluate_protocol(method, target).decision != Decision::Allow {
+        let decision = policy.evaluate_protocol(method, target).decision;
+        if decision == Decision::Deny {
             return Err(Error::Refused(Reason::MethodDenied));
         }
         if message.value().pointer("/params/cursor").is_some() {
@@ -173,7 +181,7 @@ impl ContentPolicy {
         {
             return Err(Error::Protocol);
         }
-        Ok(())
+        Ok(decision == Decision::RequireApproval)
     }
 }
 

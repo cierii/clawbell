@@ -1,3 +1,72 @@
+# Handoff — 2026-10-31: diagnostic evidence, HTTP monitoring and live audit
+
+## Delivered
+
+All four requested areas are implemented. Doctor self-tests retain private,
+content-addressed, synchronized JSON reports binding binary version/SHA-256,
+boot/kernel/architecture, bubblewrap and the exact ordinary native profile,
+delegation and budgets. Failed probes retain failed evidence. `proxy --doctor-report`
+validates it once before session creation and records its digest in durable audit;
+all MCP operations link through session_id. Reports remain local and ignored by Git,
+including nested runtime directories. Other runner profiles refuse this evidence.
+
+New init bindings contain deterministic per-client/per-server monitor endpoints.
+Normal shutdown reclaims only the service's own socket inode; existing/crash sockets
+are never adopted. proxy-http now serves the monitor and exposes independent
+request/idle/session deadline flags. Resource/prompt retrieval and enumeration can
+require exact one-use owner approval after protocol/schema checks. Shared transport
+inspection cancels on pipe EOF/output failure before a late approval can forward.
+
+`audit ... view --follow` streams bounded flushed JSONL pages with exclusive cursors,
+250 ms polling and a shared maintenance lease protecting the database generation.
+Reads release SQLite transactions before output; operation writers stay concurrent.
+README and ADR 0015 document commands, migration and limits. No dependencies,
+lockfiles, AGENTS.md rules or UI changed. Existing untracked owner documents
+`docs/audyt-mvp-i-rynku-2026-10-30.md` and `docs/uruchomienie-mvp.md` remain untouched
+and excluded from the commit.
+
+## Verification
+
+- MCP Context7: official Tokio blocking/timer contracts, rusqlite read-only
+  connections and rmcp resource/prompt request models consulted.
+- Full scripts/check-release.sh passed: locked fetch, formatting, all-target Clippy
+  with warnings denied, workspace/doc tests, release build, help/policy validation,
+  actual native enforcement, real installer/skills/transactional CLI regressions,
+  doctor/demo and release latency gates. Local sockets require running outside the
+  tool environment's socket restrictions; no product isolation or test was weakened.
+- New production HTTP CLI test passes exact resource/prompt consent, explicit
+  rejection, catalog pinning, EOF with a late approval and all three independent
+  deadline flags. IPC tests exercise one-use replies, stale IDs, owner disconnect,
+  missing owner and deny precedence. Shared monitor tests cover timeout cleanup.
+- Native CLI verifies retained reports, changed-budget refusal before audit session
+  creation, proof linkage to every session, live flushed audit rows and maintenance
+  refusal while following. Full CLI measurement includes monitor publication and
+  an active audit follower: 2000 warmed RTTs, p99 0.748 ms, max 1.647 ms (<5 ms).
+- Production policy/schema/DLP/durable-audit gate: 4000 packets, p99 352.357 us,
+  max 528.582 us. HTTP resource gate: 4000 packets, p99 269.440 us, max 347.658 us.
+  Native transport max 185.211 us; monitor publication max 7.545 us. Each measured
+  packet meets the budget; startup, human wait and transaction lifecycle are separate.
+- Report tests reject failed results, profile drift, byte tampering, symlinks and
+  nonprivate files/directories. Follow tests cover exclusive cursors, bounded pages,
+  no duplicates, concurrent append and rotation refusal. Final Clippy and targeted
+  evidence regression are repeated after strengthening private-parent validation.
+- Gitleaks scanned all 18 fetched existing commits and documentation without findings;
+  the exact final index is scanned before commit. Python AST, shell syntax, changed
+  documentation links, whitespace and scope checked. AGENTS.md remains 199 lines.
+  No UI manifests exist; npm/browser checks are not applicable.
+
+## Operational limits
+
+Evidence is unsigned, owner-local and point-in-time; it never grants execution
+permission. Retain reports alongside exports. A changed binary/boot/delegation or
+budget requires a new self-test. It does not inventory all host packages or attest
+to arbitrary workspace/server behavior; remote/skill/transaction profiles are not
+covered. Existing bindings require explicit unbind/backup archival/rebind migration.
+Stop followers for offline rotation or baseline acceptance. Crash socket leftovers
+still require explicit owner cleanup. Latency figures describe bounded warmed
+workloads, not a hard real-time guarantee under arbitrary host/storage load.
+GitHub Actions status is separate from these local checks.
+
 # Handoff — 2026-10-31: per-operation MCP publication and HTTP initialization barrier
 
 ## Delivered

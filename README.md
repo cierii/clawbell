@@ -266,8 +266,10 @@ a listing or URI template never grants retrieval permission. Lists are pinned
 before publication. Prompt arguments must match the pinned definition; resource
 contents must carry the requested URI. Text-only DLP remains mandatory. Resource
 subscriptions, list-change notifications, binary content and pagination of these
-two metadata catalogs currently refuse. require_approval for protocol rules also
-refuses; the interactive approval monitor currently handles tools only.
+two metadata catalogs currently refuse. Protocol `require_approval` suspends the
+exact validated request for one owner decision through the connected monitor,
+including lists, resource reads and prompt retrieval. A separate deny still wins;
+prompt arguments and catalog pins must pass before asking for approval.
 
 Tool catalogs support nextCursor across at most 64 pages, 4096 tools and 8 MiB in
 total, with the existing per-message limit. No call runs before the full catalog,
@@ -338,8 +340,8 @@ The example policy is owner configuration, not an upstream annotation.
 The launcher explicitly allows initialization, ping, tool enumeration, policy-gated
 tool calls and cancellation. Resources and prompts require separate exact owner
 protocol rules; without them retrieval denies. Sampling, elicitation, reverse
-capabilities and other notifications deny. `require_approval` uses the optional `proxy --monitor-socket PATH`
-endpoint; without a connected owner it denies. `clawbell monitor --socket PATH`
+capabilities and other notifications deny. `require_approval` uses the optional
+`--monitor-socket PATH` endpoint on `proxy` or `proxy-http`; without a connected owner it denies. `clawbell monitor --socket PATH`
 connects that owner-private IPC endpoint. There is no web panel or general HTTP listener. Explicit OAuth login uses a temporary
 loopback callback; it never exposes a tool-execution HTTP endpoint.
 
@@ -419,6 +421,16 @@ clawbell proxy --idle-timeout-secs 600 --request-timeout-secs 30 \
 
 These are the defaults. Idle means silence between complete messages with no
 outstanding request; request deadlines are never renewed by unrelated traffic.
+`proxy-http` accepts the same three deadline flags and defaults; it applies them
+to the common HTTP transport loop and HTTP egress request budget. For example:
+
+```bash
+clawbell proxy-http --url https://mcp.example.com/mcp \
+  --policy /absolute/policy.toml --state-dir /absolute/private-state \
+  --server reviewed-remote --request-timeout-secs 30 --idle-timeout-secs 600 \
+  --session-lifetime-secs 3600 --monitor-socket /absolute/private-state/http.sock
+```
+
 Session lifetime is absolute, applies to the native process tree, and is not
 extended by activity. Idle/lifetime ranges are 1–86400 s, requests 1–300 s. Thus a
 healthy session can read after 31 idle seconds and after 301 session seconds.
@@ -446,6 +458,7 @@ Audit reads do not create sessions or replay operations:
 ```bash
 clawbell audit --state-dir /absolute/private-state status
 clawbell audit --state-dir /absolute/private-state view --after 0 --limit 100
+clawbell audit --state-dir /absolute/private-state view --follow --after 0 --limit 100
 clawbell audit --state-dir /absolute/private-state export \
   --output /absolute/new-audit.jsonl --after 0 --limit 100000
 # Stop all sessions before this explicit owner action:
@@ -458,7 +471,15 @@ large logs with the last event ID as exclusive `--after`; `--limit` is bounded a
 generation. Status reports allocated pages, page size, quota and warning level. The
 writer also emits visible capacity warnings on stderr before intent refusal.
 
-Rotation refuses while any writer is active. It fsyncs a full private SQLite
+`view --follow` flushes new JSONL rows every 250 ms in pages of 1–1000 events
+(default 100). `--after` remains exclusive; each successful page advances its
+cursor. SQLite reads finish before output, so a slow terminal does not hold a read
+transaction. Ctrl+C stops the follower; broken output or storage errors terminate
+with an error. It holds a shared maintenance lease, preventing rotation and
+baseline acceptance while following. Stop followers before offline maintenance;
+restart at the appropriate cursor for that database generation.
+
+Rotation refuses while any writer or follower is active. It fsyncs a full private SQLite
 archive, preserves all sessions/correlations/unknown intents, records its filename,
 SHA-256 and UTC time in the active append-only rotation ledger, then reclaims event
 pages. Archives stay in the state directory; retain them to retain history. They
@@ -539,13 +560,47 @@ verifies confinement and removal, not a blanket fork ban. Missing prerequisites
 or any failed assertion exit 1; nothing is silently skipped. Python is required
 for these active probes. Temporary files are private and removed on exit.
 
-For interactive approval, add `--monitor-socket /private/directory/session.sock`
-to `clawbell proxy` and connect from another terminal with
+Self-tests and `demo` retain a synchronized 0600 JSON report in
+`.local/clawbell/doctor` by default. Use `doctor --self-test --report-dir
+/absolute/private-reports` to choose a private 0700 location; reports are retained
+until explicit owner removal. Each filename contains the SHA-256 of its exact
+bytes. JSON output identifies the file and digest. Reports include failure status
+without raw errors, UTC Unix seconds, binary version/SHA-256, boot/kernel/CPU
+architecture, bubblewrap SHA-256, the compiled read-only containment profile,
+namespace/mount/environment settings, cgroup path/device/inode/controllers and
+whole-tree memory/task/CPU/lifetime limits. Unavailable prerequisites produce a
+failed report with an unavailable profile, never reusable evidence.
+
+To attach a successful report to ordinary local MCP operations, pass
+`proxy --doctor-report /absolute/private-reports/doctor-<sha256>.json` alongside
+the usual proxy options. The proxy compares the bytes, binary and complete current
+profile before creating its session or spawning an upstream. It durably records a
+`containment_evidence` event with the report digest in `binding_sha256`; every MCP
+operation in that session is linked through `session_id`. Keep the report with the
+audit export. A changed binary, boot, cgroup or resource budget requires a new
+self-test; `doctor --session-lifetime-secs` must match the proxy lifetime (default
+3600). This is owner-local, point-in-time evidence, not a signed attestation or
+execution permission. Native preflight and policy/audit/DLP remain mandatory.
+The report does not attest to arbitrary workspace/server contents or host package
+changes after testing. Skill/transaction profiles refuse ordinary-profile evidence;
+remote HTTP processes cannot receive local containment attestation. See
+[ADR 0015](docs/adr/0015-diagnostic-evidence-and-live-monitoring.md).
+
+New `init` bindings automatically add a deterministic, per-client/per-server
+`--monitor-socket` under the private state directory. Inspect the generated
+configuration for the endpoint, then connect with `clawbell monitor --socket PATH`.
+Existing installations remain unchanged; an attempted rebind with changed generated
+settings refuses. Stop clients, `unbind`, archive the retained backup and run `init`
+again to migrate. The installer does not launch a terminal or a permanent monitor.
+
+For manual interactive approval, add `--monitor-socket /private/directory/session.sock`
+to `clawbell proxy` or `proxy-http` and connect from another terminal with
 `clawbell monitor --socket /private/directory/session.sock`. The parent must be
 owner-private 0700 and outside workspace/runtime mounts. Use one unique socket
-per proxy session. Existing endpoints refuse replacement; after the proxy exits,
-remove the stale socket explicitly. The installer does not add this optional
-flag automatically. Only policy `require_approval` calls wait for approval;
+per running proxy. Existing endpoints refuse replacement. Normal shutdown removes
+only the socket created by that proxy; after a crash, verify the previous process
+has exited before explicitly removing a leftover. Monitor service failure closes
+the proxy. Only policy `require_approval` requests wait for approval;
 missing owner, disconnect, rejection or the 25-second deadline deny. Replies
 apply once to the suspended call and cannot override any independent deny.
 Human wait and native startup are excluded from the packet latency budget.

@@ -16,6 +16,9 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 #[derive(clap::Args)]
 pub struct Options {
+    /// Retained successful self-test for this exact binary/native profile.
+    #[arg(long)]
+    pub doctor_report: Option<PathBuf>,
     /// Digest from the owner-reviewed skill-scan of this exact invocation/policy.
     #[cfg(target_os = "linux")]
     #[arg(long, requires = "skill_instructions_file")]
@@ -56,6 +59,47 @@ pub struct Options {
     pub command: Vec<String>,
 }
 impl Options {
+    fn native_config(&self, workspace: PathBuf, limits: Limits) -> Result<NativeConfig> {
+        Ok(NativeConfig {
+            workspace,
+            executable: self
+                .command
+                .first()
+                .ok_or(Code("command_required"))?
+                .clone(),
+            arguments: self.command.iter().skip(1).cloned().collect(),
+            cgroup_parent: self.cgroup_parent.clone(),
+            limits: ResourceLimits {
+                lifetime: limits.session_lifetime,
+                ..ResourceLimits::default()
+            },
+        })
+    }
+    fn containment_evidence(
+        &self,
+        limits: Limits,
+        workspace: &std::path::Path,
+    ) -> Result<Option<[u8; 32]>> {
+        if let Some(path) = &self.doctor_report {
+            let parent = path.parent().ok_or(Code("report_parent_required"))?;
+            files::trusted(parent)?;
+            validate_state(&std::fs::canonicalize(parent)?, workspace, &self.server)?;
+            #[cfg(target_os = "linux")]
+            if self.skill_scan_digest.is_some() {
+                return Err(Code("doctor_profile_mode_mismatch").into());
+            }
+            let profile = crate::evidence::profile(
+                &self.cgroup_parent,
+                ResourceLimits {
+                    lifetime: limits.session_lifetime,
+                    ..ResourceLimits::default()
+                },
+            )?;
+            Ok(Some(crate::evidence::validate(path, &profile)?))
+        } else {
+            Ok(None)
+        }
+    }
     pub(crate) fn limits(&self) -> std::result::Result<Limits, Error> {
         Limits {
             idle_timeout: std::time::Duration::from_secs(self.idle_timeout_secs),
@@ -192,13 +236,14 @@ pub async fn run(options: Options) -> Result<()> {
     let workspace = std::fs::canonicalize(&options.workspace)?;
     let state = std::fs::canonicalize(&options.state_dir)?;
     validate_state(&state, &workspace, &options.server)?;
+    let evidence = options.containment_evidence(limits, &workspace)?;
     let policy_bytes = files::read(&options.policy, 1024 * 1024)?;
     let policy = Arc::new(Policy::parse(std::str::from_utf8(&policy_bytes)?)?);
     let digest = format!("{:x}", Sha256::digest(&policy_bytes));
     let identity = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(
-            options.server,
+            &options.server,
             &workspace,
             &options.command
         ))?)
@@ -206,20 +251,17 @@ pub async fn run(options: Options) -> Result<()> {
     let store = OperationStore::open_session(&state, digest, identity.clone()).await?;
     let baseline = BaselineStore::open(&state).await?;
     let launch = store.record(0, Outcome::Intent).await?;
-    let config = NativeConfig {
-        workspace: workspace.clone(),
-        executable: options
-            .command
-            .first()
-            .ok_or(Code("command_required"))?
-            .clone(),
-        arguments: options.command.iter().skip(1).cloned().collect(),
-        cgroup_parent: options.cgroup_parent,
-        limits: ResourceLimits {
-            lifetime: limits.session_lifetime,
-            ..ResourceLimits::default()
-        },
-    };
+    if let Some(digest) = evidence {
+        store
+            .record_digest(
+                launch,
+                Outcome::Inspected,
+                Reason::ContainmentEvidence,
+                Some(digest),
+            )
+            .await?;
+    }
+    let config = options.native_config(workspace.clone(), limits)?;
     #[cfg(target_os = "linux")]
     let prepared = prepare_runner(
         config,
@@ -492,6 +534,7 @@ pub(crate) fn compose_remote(
     store: OperationStore,
     identity: String,
     bearer: Option<&clawbell_proxy::network::Bearer>,
+    monitor: Option<clawbell_proxy::monitor::Monitor>,
 ) -> Result<impl Gate + use<>> {
     let audit = AuditGate {
         remote: true,
@@ -499,6 +542,11 @@ pub(crate) fn compose_remote(
         pending: HashMap::new(),
     };
     let policy_gate = PolicyGate::new(audit, policy, baseline, identity)?;
+    let policy_gate = if let Some(monitor) = monitor {
+        policy_gate.with_monitor(monitor)
+    } else {
+        policy_gate
+    };
     Ok(SessionGate {
         inner: LocalVaultGate::for_remote(policy_gate, bearer, Limits::default().message_bytes)?,
         store,
