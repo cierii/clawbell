@@ -4,6 +4,9 @@ Status: accepted by the owner's safe-write implementation request. Extends ADR
 0011 with an opt-in Linux library publisher; persistent MCP sessions and the CLI
 remain read-only. No old tool annotation, policy allow or transport approval
 implicitly grants publication permission.
+Follow-up: [ADR 0014](0014-per-operation-mcp-publication.md) enables the explicit
+production `proxy-transaction` adapter; the original library boundary below is
+retained as the publication contract.
 
 ## Trust boundary and migration
 

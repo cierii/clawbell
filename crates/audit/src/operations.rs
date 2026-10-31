@@ -11,6 +11,14 @@ pub struct AuditError;
 /// Fixed audit vocabulary. `Unknown` never means success or a replay request.
 #[derive(Clone, Copy)]
 pub enum Outcome {
+    /// Private execution stopped and its bounded candidate inspected.
+    Inspected,
+    /// Complete redacted diff offered to the authenticated owner.
+    Review,
+    /// Owner accepted exactly this immutable review.
+    Approved,
+    /// All approved file writes and publication journal synchronized.
+    Published,
     /// Durable permission/intention preceding an operation.
     Intent,
     /// A response was inspected (not proof of the remote operation's semantics).
@@ -25,6 +33,10 @@ pub enum Outcome {
 impl Outcome {
     fn code(self) -> &'static str {
         match self {
+            Self::Inspected => "candidate_inspected",
+            Self::Review => "owner_review",
+            Self::Approved => "owner_approved",
+            Self::Published => "effect_published",
             Self::Intent => "allow_intent",
             Self::Response => "response_received",
             Self::Failure => "error_response",
@@ -38,6 +50,18 @@ impl Outcome {
 pub enum Reason {
     /// Stable `unspecified` reason.
     Unspecified,
+    /// Remote composition failed before any MCP exchange.
+    RemoteInitialization,
+    /// URL, destination validation or pinned DNS resolution failed.
+    EndpointInitialization,
+    /// Owner OAuth login or credential binding failed.
+    OAuthInitialization,
+    /// Publication may have partially changed files; manual journal review required.
+    PublicationRecovery,
+    /// Original files no longer match the approved snapshot.
+    PublicationConflict,
+    /// A durable publication journal could not be established.
+    PublicationJournal,
     /// Stable `invalid_message` reason.
     InvalidMessage,
     /// Stable `invalid_protocol_state` reason.
@@ -91,6 +115,12 @@ impl Reason {
     pub const fn code(self) -> &'static str {
         match self {
             Self::Unspecified => "unspecified",
+            Self::RemoteInitialization => "remote_initialization_failed",
+            Self::EndpointInitialization => "endpoint_initialization_failed",
+            Self::OAuthInitialization => "oauth_initialization_failed",
+            Self::PublicationRecovery => "commit_recovery_required",
+            Self::PublicationConflict => "commit_baseline_changed",
+            Self::PublicationJournal => "commit_journal_unavailable",
             Self::InvalidMessage => "invalid_message",
             Self::Protocol => "invalid_protocol_state",
             Self::Limit => "limit_exceeded",
@@ -121,6 +151,7 @@ struct Write {
     correlation: i64,
     outcome: Outcome,
     reason: Reason,
+    digest: Option<[u8; 32]>,
     answer: oneshot::Sender<Result<i64, AuditError>>,
 }
 /// Session-local handle. The database generates globally unique correlation IDs;
@@ -128,6 +159,7 @@ struct Write {
 #[derive(Clone)]
 pub struct OperationStore {
     sender: mpsc::Sender<Write>,
+    session: String,
 }
 impl OperationStore {
     /// Open in an existing trusted 0700 directory outside all sandbox mounts.
@@ -173,7 +205,7 @@ impl OperationStore {
                     let _ = ready.send(Err(AuditError));
                     return;
                 };
-                if ready.send(Ok(())).is_err() {
+                if ready.send(Ok(session.clone())).is_err() {
                     return;
                 }
                 let mut warned = 0;
@@ -182,9 +214,7 @@ impl OperationStore {
                     let result = append(
                         &connection,
                         &policy_digest,
-                        write.correlation,
-                        write.outcome,
-                        write.reason,
+                        &write,
                         &session,
                         &upstream_digest,
                     );
@@ -192,8 +222,13 @@ impl OperationStore {
                 }
             })
             .map_err(|_| AuditError)?;
-        result.await.map_err(|_| AuditError)??;
-        Ok(Self { sender })
+        let session = result.await.map_err(|_| AuditError)??;
+        Ok(Self { sender, session })
+    }
+    /// Random durable identity of this exact audit/proxy session.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session
     }
     /// Durably append a fixed event. Pass zero for a new correlation ID and the
     /// returned row ID for its response. Queue saturation refuses immediately.
@@ -212,6 +247,19 @@ impl OperationStore {
         outcome: Outcome,
         reason: Reason,
     ) -> Result<i64, AuditError> {
+        self.record_digest(correlation, outcome, reason, None).await
+    }
+    /// Persist a trusted operation/review fingerprint alongside the fixed event.
+    /// Digests bind private invocation manifests without storing names or data.
+    /// # Errors
+    /// Refuses invalid correlation, exhausted storage or writer failure.
+    pub async fn record_digest(
+        &self,
+        correlation: i64,
+        outcome: Outcome,
+        reason: Reason,
+        digest: Option<[u8; 32]>,
+    ) -> Result<i64, AuditError> {
         if correlation < 0 {
             return Err(AuditError);
         }
@@ -221,6 +269,7 @@ impl OperationStore {
                 correlation,
                 outcome,
                 reason,
+                digest,
                 answer,
             })
             .map_err(|_| AuditError)?;
@@ -269,6 +318,10 @@ fn open(directory: &Path) -> Result<Connection, AuditError> {
             "ALTER TABLE events_v1 ADD COLUMN upstream_sha256 TEXT NOT NULL DEFAULT 'legacy'",
         ),
         (
+            "binding_sha256",
+            "ALTER TABLE events_v1 ADD COLUMN binding_sha256 BLOB",
+        ),
+        (
             "reason",
             "ALTER TABLE events_v1 ADD COLUMN reason TEXT NOT NULL DEFAULT 'legacy_unspecified'",
         ),
@@ -288,6 +341,7 @@ fn open(directory: &Path) -> Result<Connection, AuditError> {
         version INTEGER PRIMARY KEY, utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     ) STRICT;
     INSERT OR IGNORE INTO operation_migrations_v1(version) VALUES(2);
+    INSERT OR IGNORE INTO operation_migrations_v1(version) VALUES(3);
     CREATE TRIGGER IF NOT EXISTS migrations_no_update BEFORE UPDATE ON operation_migrations_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;
     CREATE TRIGGER IF NOT EXISTS migrations_no_delete BEFORE DELETE ON operation_migrations_v1 BEGIN SELECT RAISE(ABORT,'append_only'); END;").map_err(|_| AuditError)?;
     tx.commit().map_err(|_| AuditError)?;
@@ -296,25 +350,23 @@ fn open(directory: &Path) -> Result<Connection, AuditError> {
 fn append(
     connection: &Connection,
     policy: &str,
-    correlation: i64,
-    outcome: Outcome,
-    reason: Reason,
+    write: &Write,
     session: &str,
     upstream: &str,
 ) -> Result<i64, AuditError> {
     let pages: u32 = connection
         .query_row("PRAGMA page_count", [], |r| r.get(0))
         .map_err(|_| AuditError)?;
-    if matches!(outcome, Outcome::Intent) && pages >= crate::maintenance::PAGE_LIMIT - 32 {
+    if matches!(write.outcome, Outcome::Intent) && pages >= crate::maintenance::PAGE_LIMIT - 32 {
         return Err(AuditError);
     }
     let inserted = connection
         .execute(
-            "INSERT INTO events_v1(correlation,policy_sha256,outcome,reason,session_id,upstream_sha256)
-             SELECT ?1,?2,?3,?4,?5,?6 WHERE ?1=0 OR EXISTS (
+            "INSERT INTO events_v1(correlation,policy_sha256,outcome,reason,session_id,upstream_sha256,binding_sha256)
+             SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE ?1=0 OR EXISTS (
                 SELECT 1 FROM events_v1 WHERE id=?1 AND session_id=?5 AND outcome='allow_intent'
              )",
-            params![correlation, policy, outcome.code(), reason.code(), session, upstream],
+            params![write.correlation, policy, write.outcome.code(), write.reason.code(), session, upstream, write.digest.as_ref().map(<[u8; 32]>::as_slice)],
         )
         .map_err(|_| AuditError)?;
     if inserted != 1 {
@@ -365,11 +417,27 @@ mod tests {
     async fn durable_correlations_payload_free_append_only_and_reopen() -> Result {
         let dir = Directory::new()?;
         let store = OperationStore::open(&dir.0, "a".repeat(64)).await?;
-        let first = store.record(0, Outcome::Intent).await?;
+        let first = store
+            .record_digest(0, Outcome::Intent, Reason::Unspecified, Some([42; 32]))
+            .await?;
         store.record(first, Outcome::Response).await?;
         let unknown = store.record(0, Outcome::Intent).await?;
         drop(store);
         let reader = open(&dir.0)?;
+        let digest: Vec<u8> = reader.query_row(
+            "SELECT binding_sha256 FROM events_v1 WHERE id=?1",
+            [first],
+            |row| row.get(0),
+        )?;
+        assert_eq!(digest, [42; 32]);
+        assert!(
+            reader
+                .execute(
+                    "UPDATE events_v1 SET binding_sha256=NULL WHERE id=?1",
+                    [first]
+                )
+                .is_err()
+        );
         let outcome: String = reader.query_row(
             "SELECT outcome FROM events_v1 WHERE correlation=?1",
             [first],

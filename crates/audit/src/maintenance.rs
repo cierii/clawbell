@@ -79,7 +79,22 @@ pub fn export(
         return Err(AuditError);
     }
     let connection = reader(directory)?;
-    let mut stmt = connection.prepare("SELECT id,correlation,utc,policy_sha256,outcome,reason,session_id,upstream_sha256 FROM events_v1 WHERE id>?1 ORDER BY id LIMIT ?2").map_err(|_| AuditError)?;
+    let has_binding = connection
+        .prepare("PRAGMA table_info(events_v1)")
+        .map_err(|_| AuditError)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|_| AuditError)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AuditError)?
+        .iter()
+        .any(|name| name == "binding_sha256");
+    // Export older v2 logs without requiring a writer or silently migrating them.
+    let sql = if has_binding {
+        "SELECT id,correlation,utc,policy_sha256,outcome,reason,session_id,upstream_sha256,lower(hex(binding_sha256)) FROM events_v1 WHERE id>?1 ORDER BY id LIMIT ?2"
+    } else {
+        "SELECT id,correlation,utc,policy_sha256,outcome,reason,session_id,upstream_sha256,'' FROM events_v1 WHERE id>?1 ORDER BY id LIMIT ?2"
+    };
+    let mut stmt = connection.prepare(sql).map_err(|_| AuditError)?;
     let rows = stmt
         .query_map(rusqlite::params![after, limit], |row| {
             Ok(Event {
@@ -91,6 +106,7 @@ pub fn export(
                 reason: row.get(5)?,
                 session_id: row.get(6)?,
                 upstream_sha256: row.get(7)?,
+                binding_sha256: row.get(8)?,
             })
         })
         .map_err(|_| AuditError)?;
@@ -113,6 +129,7 @@ struct Event {
     reason: String,
     session_id: String,
     upstream_sha256: String,
+    binding_sha256: String,
 }
 /// Archive every event/session, then reclaim active event pages. Requires all
 /// sessions stopped and explicit owner authorization. The archive is durable
@@ -189,6 +206,26 @@ mod tests {
     use super::*;
     use crate::operations::{OperationStore, Outcome};
     use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn v2_export_stays_read_only_without_a_binding_column() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = std::env::temp_dir().join(format!("clawbell-export-v2-{}", std::process::id()));
+        std::fs::create_dir(&dir)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        let _file = storage::private(&dir, "operations.sqlite3", true)?;
+        let db = Connection::open(dir.join("operations.sqlite3"))?;
+        db.execute_batch("CREATE TABLE events_v1 (id INTEGER PRIMARY KEY,correlation INTEGER,utc TEXT,policy_sha256 TEXT,outcome TEXT,reason TEXT,session_id TEXT,upstream_sha256 TEXT);
+            INSERT INTO events_v1 VALUES(1,0,'synthetic-time','synthetic-policy','allow_intent','unspecified','synthetic-session','synthetic-upstream');")?;
+        let mut output = Vec::new();
+        export(&dir, 0, 10, &mut output)?;
+        let event: serde_json::Value = serde_json::from_slice(&output)?;
+        assert_eq!(event["binding_sha256"], "");
+        assert_eq!(event["outcome"], "allow_intent");
+        assert!(db.prepare("SELECT binding_sha256 FROM events_v1").is_err());
+        drop(db);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
     #[tokio::test]
     async fn failed_retention_rolls_back_and_wal_rotation_refuses()
     -> Result<(), Box<dyn std::error::Error>> {

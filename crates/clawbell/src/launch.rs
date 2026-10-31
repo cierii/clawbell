@@ -164,7 +164,7 @@ impl Gate for AuditGate {
     }
 }
 /// Validate the optional owner endpoint without exposing it to the runner.
-fn monitor_endpoint(
+pub(crate) fn monitor_endpoint(
     socket: Option<PathBuf>,
     workspace: &std::path::Path,
 ) -> Result<Option<PathBuf>> {
@@ -284,7 +284,7 @@ pub async fn run(options: Options) -> Result<()> {
     session_result(result)
 }
 
-fn validate_owner_paths(options: &Options) -> Result<()> {
+pub(crate) fn validate_owner_paths(options: &Options) -> Result<()> {
     files::trusted(&options.state_dir)?;
     files::trusted(
         options
@@ -310,7 +310,7 @@ fn session_result(result: std::result::Result<(), Error>) -> Result<()> {
     }
 }
 
-fn validate_state(
+pub(crate) fn validate_state(
     state: &std::path::Path,
     workspace: &std::path::Path,
     server: &str,
@@ -380,7 +380,7 @@ fn compose(
 ) -> Result<impl Gate> {
     compose_monitor(policy, baseline, store, identity, None)
 }
-fn compose_monitor(
+pub(crate) fn compose_monitor(
     policy: Arc<Policy>,
     baseline: BaselineStore,
     store: OperationStore,

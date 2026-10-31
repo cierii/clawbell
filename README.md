@@ -29,7 +29,7 @@ code. The entire selected workspace is readable by that upstream, irrespective
 of tool-argument policy: never select your home, repository containing secrets,
 `.ssh`, `.aws`, or another credential tree. All host mounts are read-only; network
 sockets and persistent host writes are unavailable in the proxy launcher.
-The separate opt-in transaction library is described below.
+The explicit `proxy-transaction` mode and transaction library are described below.
 
 ```bash
 install -d -m 0700 "$HOME/.local/state/clawbell"
@@ -85,7 +85,60 @@ an interrupted install is described in [ADR 0006](docs/adr/0006-mvp-installer-an
 Multiple files are committed independently; earlier files remain protected if a
 later one fails. Test configuration changes in temporary fixtures first.
 
-## Transactional file staging (library boundary)
+## Transactional MCP operations (explicit Linux mode)
+
+`proxy-transaction` runs an unchanged stdio MCP executable in a fresh private
+sandbox for each operation. The production policy, schema/catalog pins, DLP and
+durable audit apply before execution. Tool results stay private until the complete
+process group stops and the actual filesystem changes pass inspection. A write
+requires a separate owner approval of the complete redacted diff before the trusted
+committer publishes it. Ordinary `proxy` and installed client bindings retain their
+read-only host mounts.
+
+```bash
+clawbell proxy-transaction \
+  --policy /absolute/path/transaction-policy.toml \
+  --workspace /absolute/path/credential-free-workspace \
+  --state-dir /absolute/path/private-state \
+  --journal-dir /absolute/path/private-durable-journal \
+  --cgroup-parent /sys/fs/cgroup/your-persistent-delegation \
+  --monitor-socket /absolute/path/private-state/owner.sock \
+  --server reviewed-local-server \
+  -- /usr/bin/python3 -B /workspace/server.py
+# In another terminal, as the workspace owner:
+clawbell monitor --socket /absolute/path/private-state/owner.sock
+```
+
+Create state/journal directories at mode 0700 outside all runner mounts; the journal
+must be on persistent storage, not `/tmp` when that is tmpfs. The policy must declare
+the upstream tools and independently grant `clawbell.commit` for actual affected
+paths; see [commit-example.toml](policies/commit-example.toml). First catalog use
+still refuses until the owner reviews/accepts it with `clawbell pins`. A policy
+`require_approval` on the upstream tool asks for private-execution consent first;
+the later diff approval is always required for publication, even with `allow`.
+Connect the owner monitor before requesting approval and remove a stopped socket
+only after verifying that its previous process has exited.
+
+This mode supports initialization, ping and tool catalogs/calls with one outstanding
+request. It replays initialization/catalog exchanges into each fresh process and
+requires their responses to match exactly; it never replays a prior tool call.
+Servers relying on persistent process state, changing initialization metadata,
+reverse requests or dynamic cursors can refuse. Resources/prompts and scan-bound
+skill flags are unsupported here. Every surviving write by a declared read tool
+refuses. Supported writes replace existing UTF-8 regular files only; creations,
+deletions, protected memory, unsupported metadata, no-op candidates and previews
+exceeding the monitor's complete 1800-character display budget refuse.
+
+Publication uses verified file handles and a durable recovery journal, with the
+non-atomic write contract below. A completed or partial journal blocks another
+publication until the owner inspects and archives it explicitly; there is no
+background replay or rollback. Keep external writers quiescent from snapshot to
+commit. Client disconnect cancels waiting consent; an already-running commit is
+joined and audited even when its response cannot reach the client. Startup,
+snapshots, inspection, owner review and publication are measured separately from
+the warmed <5 ms proxy packet budget. See [ADR 0014](docs/adr/0014-per-operation-mcp-publication.md).
+
+### Transaction library boundary
 
 Linux integrations can use `clawbell_sandbox::transaction::Transaction` for one
 owner-authorized execution. `prepare(NativeConfig, Effect, TreeLimits)` copies a
@@ -118,8 +171,9 @@ specific path prefix; protected memory such as SOUL.md always refuses.
 The narrow committer replaces contents of existing UTF-8 regular files through
 verified handles. Creation/deletion, binary replacements and metadata changes
 refuse. Host edits, inode substitutions, symlinks and hardlinks invalidate consent.
-Snapshots, review and commit run outside the packet path. There is no CLI write
-mode or automatic publication from persistent MCP sessions.
+Snapshots, review and commit run outside the packet path. The explicit
+`proxy-transaction` adapter supplies this lifecycle; persistent `proxy` sessions
+do not automatically publish changes.
 
 Provide an owner-only 0700 journal directory on persistent storage outside the
 workspace. The committer exclusively creates a private hash-only journal and
@@ -307,7 +361,8 @@ text resources with no MIME type, `text/plain`, or `text/markdown`. Binary blobs
 (including blobs labelled as text), images, audio, resource links, unknown content
 variants/fields and other resource MIME types deny before the inner policy/audit
 gate. The same format checks cover resource-read and prompt-message results in
-library integrations; the CLI still denies those methods. Structured JSON remains
+the explicitly authorized ordinary and HTTP proxy modes; `proxy-transaction`
+denies resource/prompt methods. Structured JSON remains
 subject to recursive scalar inspection, not arbitrary Base64 decoding.
 
 Ordered tool-result text/inline-resource blocks are inspected together. A secret

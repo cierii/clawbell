@@ -1,3 +1,88 @@
+# Handoff — 2026-10-31: per-operation MCP publication and HTTP initialization barrier
+
+## Delivered
+
+All four requested changes are implemented. HTTP initialized POSTs form a barrier
+until a complete empty 202 response; failures never forward the next queued POST.
+Remote baseline/endpoint/DNS/OAuth/composition startup errors close their durable
+launch intent with fixed terminal codes. Valid canonical remote identity pins are
+preserved; runtime transport outcomes remain unknown rather than claiming rollback.
+
+Production `proxy-transaction` composes existing gates, native Transaction and
+handle committer. It starts a fresh unchanged executable per operation, replays only
+bounded initialization/catalog exchanges and requires exact metadata equality.
+It holds tool output until explicit direct-child reap, whole-group cleanup and
+inspection; owner-reviewed publication uses the actual frozen diff. The private
+monitor displays redacted invocation, effect scope, review digest and expiry.
+Client disconnect cancels pending consent; an already-dispatched publication worker
+is joined and its real result audited. Existing ordinary/HTTP proxies and client
+bindings do not silently acquire writes. No new dependencies or unsafe code.
+
+Audit migration 3 adds nullable operation/review fingerprints, durable random-session
+binding and fixed lifecycle/recovery outcomes. Existing rows remain append-only;
+JSONL exports include hex fingerprints and still read v2 logs without migration.
+README, example-policy comments and ADR 0014 document opt-in migration, narrow file
+support, complete monitor-preview limits and journal recovery. AGENTS.md is unchanged
+at 199 lines. The two pre-existing untracked owner documents remain untouched and
+will not be included in the commit.
+
+## Verification
+
+- Context7 official rmcp transport/initialization documentation consulted.
+- `scripts/check-release.sh` passed: locked fetch, fmt, all-target Clippy/-D warnings,
+  workspace/doc tests, release build, help/policy smoke checks, all latency gates,
+  real native enforcement, installer, skill and transactional CLI tests and doctor/demo.
+- HTTP regression covers delayed acceptance, wrong status, nonempty body, disconnect
+  and timeout with pipelined traffic. Remote startup regression covers invalid URL,
+  DNS failure, metadata endpoint refusal, OAuth setup and unavailable baseline store.
+- Native transactional CLI covers successful publication and ten refusal/recovery
+  scenarios: hidden protected-memory write, symlink, tool error, binary result,
+  catalog drift, lying read tool, owner rejection, client EOF with late acceptance,
+  external-file conflict and existing publication journal. It verifies unchanged
+  host canaries on refusal, withheld responses before approval and the complete
+  correlated durable audit chain. Existing native fault/crash committer tests pass.
+- Bounded warmed production gate: 4000 packets, p99 367.667 us, max 843.328 us.
+  Remote-resource gate: 4000 packets, p99 307.172 us, max 1.018430 ms.
+  Native transport: 2000 RTTs, max 131.820 us. Full ordinary CLI/native/policy/DLP/
+  durable-audit RTT: 2000 samples, p99 0.726 ms, max 0.847 ms. All measured packet
+  samples <5 ms; startup/snapshot/review/publication are separate lifecycle costs.
+- Final post-review checks explicitly repeat all-target Clippy, workspace tests and
+  native transaction tests after strengthening direct-child reap and cancellation.
+  The final native run passed; complete transactional read lifecycle (snapshot,
+  start, replay, inspect, reap and audit) took 62.228–66.264 ms across four samples,
+  separately from packet forwarding overhead and without human approval time.
+- Fetched origin refs/tags; gitleaks 8.30.1 scanned all 17 existing commits with no
+  findings. The exact final index is scanned before commit. This is detection within
+  scanned history/content, not a guarantee about every possible secret or remote fork.
+- Python AST/Bash syntax, changed documentation links, whitespace and scope checked.
+  No UI manifests exist or changed, so npm/browser checks are not applicable.
+
+## Operational limits and next use
+
+See README and ADR 0014 for `proxy-transaction` invocation. Requires Linux native
+prerequisites, private state/socket and a separate durable non-tmpfs journal lane;
+/tmp on this host is tmpfs and correctly refuses as publication storage. Add actual
+upstream-tool grants plus independent path-scoped `clawbell.commit` grants. Owner
+must explicitly accept initial pins, connect monitor and review each complete diff.
+
+Publication replaces existing ordinary UTF-8 files only; no-op/creation/deletion/
+metadata/protected-memory changes and previews beyond the current 1800-character
+monitor display budget refuse. Servers needing mutable process state or dynamic
+initialization/catalog metadata may be incompatible. Only initialization/ping/tools
+are supported in this mode. Resources/prompts, scan-bound skills and remote process
+transactions are unsupported; no isolation fallback was introduced.
+
+Writes remain non-atomic, even for one file. Keep external writers quiescent and
+inspect/archive a successful or interrupted journal explicitly before another
+publication; no automatic replay, cleanup, recovery or rollback. Packet measurements
+are bounded warmed workloads, not a universal hard real-time guarantee. Final GitHub
+Actions status must be checked separately from local verification.
+
+Local tools: RUSTUP_HOME=/tmp/clawbell-audit-rustup,
+CARGO_HOME=/tmp/clawbell-audit-cargo, PATH=/tmp/clawbell-audit-cargo/bin:/usr/bin:/bin.
+
+---
+
 # Handoff — 2026-10-31: pinned HTTP, protocol catalogs and scanned Linux skills
 
 ## Result and remaining scope

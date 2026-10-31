@@ -218,6 +218,54 @@ fn transform(
     }
     Ok(())
 }
+/// Inspect a complete private server response before any associated effects are
+/// published. Shares the production DLP rules and caller's session vault; it does
+/// not authorize execution, write audit or disclose the returned packet.
+/// # Errors
+/// Refuses unsupported formats, fragmented/scalar secrets and secret catalogs.
+pub fn inspect_server_message(
+    vault: &mut Vault,
+    message: &Envelope,
+    limit: usize,
+) -> Result<Envelope, Error> {
+    inspect_result_formats(message.value())?;
+    let mut value = message.value().clone();
+    transform(&mut value, &mut |s| {
+        vault
+            .redact(s)
+            .map_err(|_| Error::Refused(Reason::DlpDenied))
+    })?;
+    // Discover all individual credentials first, then inspect semantic
+    // text units against the complete vault before releasing any output.
+    inspect_text_units(vault, message.value())?;
+    // A later field/unit may register a value seen earlier. Redact from
+    // the original only after discovery, so JSON field order cannot leak.
+    value = message.value().clone();
+    transform(&mut value, &mut |s| {
+        vault
+            .redact(s)
+            .map_err(|_| Error::Refused(Reason::DlpDenied))
+    })?;
+    // Session-random markers cannot participate in a persistent pin.
+    // Refuse secret-bearing catalogs before the first baseline write.
+    if ["tools", "resources", "resourceTemplates", "prompts"]
+        .iter()
+        .any(|key| message.value().pointer(&format!("/result/{key}")).is_some())
+        && value != *message.value()
+    {
+        return Err(Error::Refused(Reason::CatalogDenied));
+    }
+    let redacted = Envelope::parse(
+        &serde_json::to_vec(&value).map_err(|_| Error::Refused(Reason::DlpDenied))?,
+        Direction::Server,
+        limit,
+    )?;
+    if redacted.id() != message.id() || redacted.method() != message.method() {
+        return Err(Error::Refused(Reason::DlpDenied));
+    }
+    Ok(redacted)
+}
+
 impl<G: Gate> Gate for LocalVaultGate<G> {
     fn permits_remote(&self) -> bool {
         self.remote && self.inner.permits_remote()
@@ -232,41 +280,7 @@ impl<G: Gate> Gate for LocalVaultGate<G> {
             .as_mut()
             .ok_or(Error::Refused(Reason::DlpDenied))?;
         if direction == Direction::Server {
-            inspect_result_formats(message.value())?;
-            let mut value = message.value().clone();
-            transform(&mut value, &mut |s| {
-                vault
-                    .redact(s)
-                    .map_err(|_| Error::Refused(Reason::DlpDenied))
-            })?;
-            // Discover all individual credentials first, then inspect semantic
-            // text units against the complete vault before releasing any output.
-            inspect_text_units(vault, message.value())?;
-            // A later field/unit may register a value seen earlier. Redact from
-            // the original only after discovery, so JSON field order cannot leak.
-            value = message.value().clone();
-            transform(&mut value, &mut |s| {
-                vault
-                    .redact(s)
-                    .map_err(|_| Error::Refused(Reason::DlpDenied))
-            })?;
-            // Session-random markers cannot participate in a persistent pin.
-            // Refuse secret-bearing catalogs before the first baseline write.
-            if ["tools", "resources", "resourceTemplates", "prompts"]
-                .iter()
-                .any(|key| message.value().pointer(&format!("/result/{key}")).is_some())
-                && value != *message.value()
-            {
-                return Err(Error::Refused(Reason::CatalogDenied));
-            }
-            let redacted = Envelope::parse(
-                &serde_json::to_vec(&value).map_err(|_| Error::Refused(Reason::DlpDenied))?,
-                direction,
-                self.limit,
-            )?;
-            if redacted.id() != message.id() || redacted.method() != message.method() {
-                return Err(Error::Refused(Reason::DlpDenied));
-            }
+            let redacted = inspect_server_message(vault, message, self.limit)?;
             return self.inner.inspect(direction, &redacted).await;
         }
         let mut checked = message.value().clone();

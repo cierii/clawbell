@@ -306,6 +306,19 @@ where
                 wire = server_rx.recv() => {
                     let Some(wire) = wire else { return Ok(()); };
                     if posts.len() >= limits.pending { return Err(Error::Limit); }
+                    // Initialized is a transport barrier: do not dequeue another
+                    // POST until its empty 202 response has been fully validated.
+                    let initialized = Envelope::parse(&wire.bytes, Direction::Client, limits.message_bytes)?
+                        .method() == Some("notifications/initialized");
+                    if initialized {
+                        while let Some(result) = posts.join_next().await {
+                            result.map_err(|_| Error::Transport)??;
+                        }
+                        let messages = tokio::time::timeout(limits.request_timeout, target.post(wire, limits))
+                            .await.map_err(|_| Error::Timeout)??;
+                        if !messages.is_empty() { return Err(Error::Protocol); }
+                        continue;
+                    }
                     let target = target.clone(); let events = events.clone();
                     posts.spawn(async move {
                         let messages = tokio::time::timeout(limits.request_timeout, target.post(wire, limits)).await.map_err(|_| Error::Timeout)??;
@@ -431,6 +444,141 @@ mod session_tests {
             )
             .await?;
         server.await??;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod barrier_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+    struct FixtureGate;
+    impl Gate for FixtureGate {
+        fn inspect(
+            &mut self,
+            _: Direction,
+            message: &Envelope,
+        ) -> impl std::future::Future<Output = Result<Envelope, Error>> + Send {
+            std::future::ready(Ok(message.clone()))
+        }
+        fn finish(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+            std::future::ready(Ok(()))
+        }
+    }
+    async fn receive(listener: &tokio::net::TcpListener) -> TestResult<tokio::net::TcpStream> {
+        let (stream, _) = listener.accept().await?;
+        let mut read = BufReader::new(stream);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            read.read_line(&mut line).await?;
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':')
+                && key.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse()?;
+            }
+        }
+        let mut body = vec![0; length];
+        read.read_exact(&mut body).await?;
+        Ok(read.into_inner())
+    }
+    async fn send(stream: &mut tokio::net::TcpStream, status: &str, body: &str) -> TestResult {
+        stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn initialized_202_is_a_barrier_and_failure_never_sends_the_next_post() -> TestResult {
+        for behavior in ["accepted", "wrong-status", "body", "disconnect", "timeout"] {
+            check(behavior).await?;
+        }
+        Ok(())
+    }
+    async fn check(behavior: &'static str) -> TestResult {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let limits = Limits {
+            request_timeout: std::time::Duration::from_millis(250),
+            ..Limits::default()
+        };
+        let endpoint = crate::network::Endpoint::connect(
+            &format!("http://{}/mcp", listener.local_addr()?),
+            Some("127.0.0.1".parse()?),
+            limits,
+        )
+        .await?;
+        let (client, proxy) = tokio::io::duplex(8192);
+        let (read, write) = tokio::io::split(proxy);
+        let relay = tokio::spawn(async move {
+            relay(
+                read,
+                write,
+                Target::streamable(endpoint),
+                &mut FixtureGate,
+                limits,
+            )
+            .await
+        });
+        let server = tokio::spawn(async move {
+            let mut init = receive(&listener).await?;
+            send(&mut init, "200 OK", &json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}).to_string()).await?;
+            let mut initialized = receive(&listener).await?;
+            // The next client packet is already queued. No connection is allowed
+            // while the initialized acknowledgement is deliberately withheld.
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(40), listener.accept())
+                    .await
+                    .is_err()
+            );
+            match behavior {
+                "accepted" => send(&mut initialized, "202 Accepted", "").await?,
+                "wrong-status" => send(&mut initialized, "200 OK", "").await?,
+                "body" => send(&mut initialized, "202 Accepted", "{}").await?,
+                "disconnect" => drop(initialized),
+                "timeout" => {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    drop(initialized);
+                }
+                _ => unreachable!(),
+            }
+            if behavior == "accepted" {
+                let mut next = receive(&listener).await?;
+                send(
+                    &mut next,
+                    "200 OK",
+                    r#"{"jsonrpc":"2.0","id":2,"result":{}}"#,
+                )
+                .await?;
+            } else {
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(80), listener.accept())
+                        .await
+                        .is_err()
+                );
+            }
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let (read, mut write) = tokio::io::split(client);
+        let mut read = BufReader::new(read);
+        write.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n").await?;
+        let mut response = String::new();
+        read.read_line(&mut response).await?;
+        assert_eq!(serde_json::from_str::<Value>(&response)?["id"], 1);
+        write.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n").await?;
+        response.clear();
+        read.read_line(&mut response).await?;
+        if behavior == "accepted" {
+            assert_eq!(serde_json::from_str::<Value>(&response)?["id"], 2);
+        } else {
+            assert_eq!(response, "");
+        }
+        drop(write);
+        drop(read);
+        server.await??;
+        assert!(relay.await?.is_err());
         Ok(())
     }
 }

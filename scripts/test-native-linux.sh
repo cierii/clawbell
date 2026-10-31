@@ -12,6 +12,7 @@ cargo test -p clawbell-proxy --release --locked --test native_runner -- --ignore
 cargo build --release --locked -p clawbell
 python3 scripts/test-mvp-cli.py
 python3 scripts/test-skill-cli.py
+python3 scripts/test-transaction-cli.py
 target/release/clawbell doctor --cgroup-parent "$parent"
 target/release/clawbell doctor --self-test --cgroup-parent "$parent"
 target/release/clawbell demo --cgroup-parent "$parent"

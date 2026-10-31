@@ -6,7 +6,7 @@ use crate::{
 };
 use clawbell_audit::{
     baseline::BaselineStore,
-    operations::{OperationStore, Outcome},
+    operations::{OperationStore, Outcome, Reason},
 };
 use clawbell_core::policy::Policy;
 use clawbell_proxy::{
@@ -163,14 +163,16 @@ pub async fn run(options: Options) -> Result<()> {
     if options.server.is_empty() || options.server.len() > 128 {
         return Err(Code("invalid_server_identity").into());
     }
-    // URL is canonicalized before OAuth audience checks and persistent identity.
+    // Preserve existing canonical endpoint pins. Invalid URL input is hashed
+    // provisionally; its parse error is returned only after durable launch intent.
     let mut options = options;
-    options.url = reqwest::Url::parse(&options.url)?.to_string();
+    let identity_url = reqwest::Url::parse(&options.url)
+        .map_or_else(|_| options.url.clone(), |url| url.to_string());
     let identity = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(
             &options.server,
-            &options.url,
+            &identity_url,
             &options.oauth_client_id,
             &options.oauth_authorization_url,
             &options.oauth_token_url
@@ -182,34 +184,133 @@ pub async fn run(options: Options) -> Result<()> {
         identity.clone(),
     )
     .await?;
-    let baseline = BaselineStore::open(&options.state_dir).await?;
     let launch = store.record(0, Outcome::Intent).await?;
-    let endpoint = Endpoint::connect(&options.url, options.private_ip, limits).await?;
-    let bearer = login(&options, limits).await?;
-    let mut gate =
-        crate::launch::compose_remote(policy, baseline, store.clone(), identity, bearer.as_ref())?;
-    let endpoint = match bearer {
-        Some(bearer) => endpoint.with_bearer(bearer)?,
-        None => endpoint,
-    };
-    let result = relay(
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-        Target::streamable(endpoint),
-        &mut gate,
-        limits,
-    )
-    .await;
-    store.record(launch, Outcome::Unknown).await?;
-    match result {
-        Ok(()) | Err(clawbell_proxy::Error::Closed) => Ok(()),
-        Err(e) => Err(e.into()),
+    let mut stage = Reason::RemoteInitialization;
+    let result: Result<()> = async {
+        let baseline = BaselineStore::open(&options.state_dir).await?;
+        stage = Reason::EndpointInitialization;
+        options.url = reqwest::Url::parse(&options.url)?.to_string();
+        let endpoint = Endpoint::connect(&options.url, options.private_ip, limits).await?;
+        stage = Reason::OAuthInitialization;
+        let bearer = login(&options, limits).await?;
+        stage = Reason::RemoteInitialization;
+        let mut gate = crate::launch::compose_remote(
+            policy,
+            baseline,
+            store.clone(),
+            identity,
+            bearer.as_ref(),
+        )?;
+        stage = Reason::OAuthInitialization;
+        let endpoint = match bearer {
+            Some(bearer) => endpoint.with_bearer(bearer)?,
+            None => endpoint,
+        };
+        stage = Reason::Unspecified;
+        let result = relay(
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+            Target::streamable(endpoint),
+            &mut gate,
+            limits,
+        )
+        .await;
+        match result {
+            Ok(()) | Err(clawbell_proxy::Error::Closed) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
+    .await;
+    let (outcome, reason) = match &result {
+        Ok(()) => (Outcome::Unknown, Reason::Closed),
+        Err(error) => (
+            if stage == Reason::Unspecified {
+                Outcome::Unknown
+            } else {
+                Outcome::Failure
+            },
+            if stage == Reason::Unspecified {
+                error
+                    .downcast_ref::<clawbell_proxy::Error>()
+                    .map_or(Reason::Transport, clawbell_proxy::Error::reason)
+            } else {
+                stage
+            },
+        ),
+    };
+    store.record_reason(launch, outcome, reason).await?;
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn startup_failures_close_the_launch_intent_without_payloads() -> Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        for case in ["url", "dns", "endpoint", "oauth", "baseline"] {
+            let root = std::env::temp_dir().join(format!(
+                "clawbell-remote-terminal-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+            let policy = root.join("policy.toml");
+            std::fs::write(
+                &policy,
+                "version = \"remote-terminal\"\ntools = []\nrules = []\n",
+            )?;
+            let url = match case {
+                "url" => "malformed synthetic url",
+                "dns" => "https://clawbell-synthetic-nonexistent.invalid/mcp",
+                "endpoint" => "http://169.254.169.254/mcp",
+                _ => "http://127.0.0.1:1/mcp",
+            };
+            if case == "baseline" {
+                std::fs::create_dir(root.join("tool-baselines.sqlite3"))?;
+            }
+            let options = Options {
+                url: url.into(),
+                private_ip: Some("127.0.0.1".parse()?),
+                policy,
+                state_dir: root.clone(),
+                server: "synthetic-remote".into(),
+                oauth_login: case == "oauth",
+                oauth_authorization_url: Some("invalid".into()),
+                oauth_token_url: Some("invalid".into()),
+                oauth_client_id: Some("synthetic-client".into()),
+                oauth_scope: Vec::new(),
+            };
+            assert!(run(options).await.is_err());
+            let db = rusqlite::Connection::open(root.join("operations.sqlite3"))?;
+            let events = db
+                .prepare("SELECT outcome,reason,correlation FROM events_v1 ORDER BY id")?
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].0, "allow_intent");
+            assert_eq!(events[1].0, "error_response");
+            assert!(events[1].2 > 0);
+            assert_eq!(
+                events[1].1,
+                match case {
+                    "oauth" => "oauth_initialization_failed",
+                    "baseline" => "remote_initialization_failed",
+                    _ => "endpoint_initialization_failed",
+                }
+            );
+            drop(db);
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
     #[tokio::test]
     async fn oauth_callback_accepts_only_bounded_exact_loopback_requests() -> Result<()> {
         for attack in ["valid", "wrong-host", "duplicate-code", "origin", "post"] {

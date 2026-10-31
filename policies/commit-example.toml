@@ -1,4 +1,5 @@
-# Explicit opt-in for the Linux transaction committer library, not the proxy.
+# Explicit publication grant for proxy-transaction or the Linux committer library.
+# Also declare and authorize the actual upstream tools in your owner policy.
 # Review every complete redacted replacement; approval never overrides deny.
 version = "commit-example-v1"
 

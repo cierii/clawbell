@@ -9,6 +9,8 @@ mod remote;
 mod scan;
 #[cfg(target_os = "linux")]
 mod skill_scan;
+#[cfg(target_os = "linux")]
+mod transactional;
 use crate::errors::Code;
 use clap::{Parser, Subcommand};
 use clawbell_proxy::monitor::{Command, Event, frame};
@@ -65,6 +67,9 @@ enum Action {
     Proxy(launch::Options),
     /// Relay stdio to an owner-pinned remote Streamable HTTP MCP endpoint.
     ProxyHttp(remote::Options),
+    /// Execute each local tool in private staging, then review and publish its actual diff.
+    #[cfg(target_os = "linux")]
+    ProxyTransaction(transactional::Options),
     /// Scan exact skill code, invocation, policy and initialization instructions.
     #[cfg(target_os = "linux")]
     SkillScan(skill_scan::Options),
@@ -151,6 +156,8 @@ async fn dispatch(action: Action) -> files::Result<i32> {
         }
         Action::Proxy(options) => launch::run(options).await?,
         Action::ProxyHttp(options) => remote::run(options).await?,
+        #[cfg(target_os = "linux")]
+        Action::ProxyTransaction(options) => transactional::run(options).await?,
         #[cfg(target_os = "linux")]
         Action::SkillScan(options) => skill_scan::run(options).await?,
         Action::Init {
