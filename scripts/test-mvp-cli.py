@@ -158,6 +158,19 @@ decision = "allow"
     approved = subprocess.run([str(BINARY), "pins", "--state-dir", str(state), "accept", "--review-id", str(candidates[0]["id"]), "--accept"], capture_output=True, timeout=10)
     assert approved.returncode == 0
 
+    # Process-cold sessions, with existing reviewed pins. This includes launch,
+    # audit/session initialization and MCP initialize/catalog, but not compilation,
+    # first-owner approval or an OS page-cache flush.
+    startup_samples = []
+    for _ in range(20):
+        started = time.perf_counter_ns()
+        peer = start()
+        try:
+            assert initialize(peer)["result"]["tools"]
+            startup_samples.append(time.perf_counter_ns() - started)
+        finally:
+            finish(peer)
+
     # Follow releases SQLite reads before writing output, and pins the generation.
     with sqlite3.connect(state / "operations.sqlite3") as audit:
         after = audit.execute("SELECT max(id) FROM events_v1").fetchone()[0]
@@ -207,7 +220,17 @@ decision = "allow"
     follower.wait(timeout=5)
     follower.stderr.close()
     print(f"Full CLI/native/audit/DLP/policy RTT: n={len(samples)}, "
+          f"p95={statistics.quantiles(samples, n=100)[94]:.3f} ms, "
           f"p99={statistics.quantiles(samples, n=100)[98]:.3f} ms, max={max(samples):.3f} ms")
+    def summary(values):
+        ordered = sorted(values)
+        return {"samples": len(ordered), "unit": "ns", "quantile": "nearest_rank",
+                **{name: ordered[(len(ordered) * percent + 99) // 100 - 1]
+                   for name, percent in [("p50", 50), ("p95", 95), ("p99", 99), ("max", 100)]}}
+    print("CLAWBELL_EVALUATION=" + json.dumps({
+        "process_cold_start": summary(startup_samples),
+        "native_cli_rtt": summary([round(sample * 1_000_000) for sample in samples]),
+        "native_allowed_reads": {"attempted": 2200, "completed": 2200}}))
     assert max(samples) < 5, "full warmed RTT exceeds 5 ms release budget"
 
     refused("tools/call", {"name": "read_file", "arguments": {"path": "outside/.env"}})

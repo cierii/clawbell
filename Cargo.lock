@@ -302,7 +302,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clawbell"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "clawbell-audit",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "clawbell-audit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clawbell-core",
  "libc",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "clawbell-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "clawbell-proxy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clawbell-audit",
  "clawbell-core",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "clawbell-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clawbell-core",
  "getrandom 0.2.17",

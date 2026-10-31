@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Ordinary local checks. Native enforcement is a separate mandatory release check.
 set -euo pipefail
+python3 scripts/test-installer.py
+python3 scripts/test-evaluation.py
 cargo fetch --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings

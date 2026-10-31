@@ -246,12 +246,125 @@ async fn complete_mvp_gate_packets_under_five_ms() -> Result<()> {
     durations.sort_unstable();
     let maximum = *durations.last().ok_or("no_measurements")?;
     eprintln!(
-        "MVP policy/schema/DLP/monitor/durable-audit encode/parse: {} packets, p99 {:?}, max {:?}",
+        "MVP policy/schema/DLP/monitor/durable-audit encode/parse: {} packets, p95 {:?}, p99 {:?}, max {:?}",
         durations.len(),
+        durations[durations.len() * 95 / 100],
         durations[durations.len() * 99 / 100],
         maximum
     );
+    eprintln!(
+        "CLAWBELL_EVALUATION={}",
+        json!({"gate_packet": latency_summary(&durations)?})
+    );
     assert!(maximum < std::time::Duration::from_millis(5));
+    Ok(())
+}
+
+/// Nearest-rank quantiles in nanoseconds, with no interpolation or subtraction
+/// between unrelated benchmarks. Input must be nonempty and sorted.
+fn latency_summary(sorted: &[std::time::Duration]) -> Result<Value> {
+    let at = |percent: usize| -> Result<u128> {
+        Ok(sorted
+            .get((sorted.len() * percent).div_ceil(100).saturating_sub(1))
+            .ok_or("empty_measurements")?
+            .as_nanos())
+    };
+    Ok(json!({
+        "samples": sorted.len(), "unit": "ns", "quantile": "nearest_rank",
+        "p50": at(50)?, "p95": at(95)?, "p99": at(99)?, "max": at(100)?
+    }))
+}
+
+#[tokio::test]
+#[ignore = "explicit release evaluation: synthetic corpus and FULL durable audit"]
+async fn release_evaluation_corpus_and_durable_audit() -> Result<()> {
+    use clawbell_audit::operations::Outcome;
+    // Every benign workflow uses the production gate, schema, pin and audit stack.
+    // The corpus deliberately includes credential examples and known-secret
+    // prefixes; false positives are reported instead of tuning them out.
+    let benign = [
+        "public note",
+        "hello world",
+        "read the file",
+        "count 42",
+        "ready.",
+        "Unicode: café",
+        "Unicode: zażółć",
+        "JSON null",
+        "localhost example",
+        "https://example.com/docs",
+        "package version 1.0",
+        "no changes.",
+        "ordinary status",
+        "class",
+        "files",
+        "notes",
+        "items",
+        "success",
+        "API_KEY=example-documentation-value",
+        "TEST_TOKEN=example-public-placeholder",
+    ];
+    let mut completed = 0;
+    let mut alarms = 0;
+    let mut false_refusals = 0;
+    let mut false_redactions = 0;
+    for text in benign {
+        let dir = Directory::new()?;
+        let mut proxy = gate(&dir).await?;
+        catalog(&mut proxy, "Read notes").await?;
+        call(&mut proxy, "read_file", json!({"path":"notes/public.txt"})).await??;
+        // Learn a synthetic literal through the same server DLP boundary.
+        proxy.inspect(Direction::Server, &packet(&json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"TEST_TOKEN=synthetic-evaluation-credential"}]}}), Direction::Server)?).await?;
+        call(&mut proxy, "read_file", json!({"path":"notes/public.txt"})).await??;
+        let result = proxy.inspect(Direction::Server, &packet(&json!({"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":text}]}}), Direction::Server)?).await;
+        match result {
+            Ok(envelope) => {
+                if serde_json::from_slice::<Value>(&envelope.encode()?)?["result"]["content"][0]["text"]
+                    == text
+                {
+                    completed += 1;
+                } else {
+                    alarms += 1;
+                    false_redactions += 1;
+                }
+            }
+            Err(Error::Refused(Reason::DlpDenied)) => {
+                alarms += 1;
+                false_refusals += 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let directory = Directory::new()?;
+    let store = OperationStore::open(&directory.0, "a".repeat(64)).await?;
+    let mut intent_times = Vec::new();
+    let mut response_times = Vec::new();
+    for iteration in 0..2200 {
+        let start = std::time::Instant::now();
+        let correlation = store.record(0, Outcome::Intent).await?;
+        let intent = start.elapsed();
+        let start = std::time::Instant::now();
+        store.record(correlation, Outcome::Response).await?;
+        if iteration >= 200 {
+            intent_times.push(intent);
+            response_times.push(start.elapsed());
+        }
+    }
+    intent_times.sort_unstable();
+    response_times.sort_unstable();
+    eprintln!(
+        "CLAWBELL_EVALUATION={}",
+        json!({
+            "benign_corpus": {"workflows": benign.len(), "completed_unchanged": completed,
+                "dlp_false_alarms": alarms,
+                "dlp_false_refusals": false_refusals,
+                "dlp_false_redactions": false_redactions,
+                "scope": "synthetic read-tool workflows; refusal or changed public text is an alarm"},
+            "durable_audit_intent": latency_summary(&intent_times)?,
+            "durable_audit_response": latency_summary(&response_times)?
+        })
+    );
+    assert_eq!(completed + alarms, benign.len());
     Ok(())
 }
 

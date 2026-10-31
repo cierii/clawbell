@@ -49,3 +49,7 @@ id_ed25519
 # Host-only OAuth credentials and crash leases
 oauth-*.json
 oauth-*.lease
+
+# Local Python verification bytecode
+__pycache__/
+*.pyc

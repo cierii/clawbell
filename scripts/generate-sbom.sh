@@ -2,7 +2,11 @@
 # No runtime hooks. Inspect the same locked default-feature Linux binary graph.
 set -euo pipefail
 test "$(cargo cyclonedx --version | awk '{print $NF}')" = '0.5.9'
-test "$(rustc -vV | sed -n 's/^host: //p')" = x86_64-unknown-linux-gnu
+host=$(rustc -vV | sed -n 's/^host: //p')
+case "$host" in
+    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) ;;
+    *) echo 'unsupported native SBOM target' >&2; exit 1 ;;
+esac
 # The generator has no --locked flag. Force offline resolution and verify that
 # it did not rewrite the reviewed lockfile; never accept a silently updated graph.
 generated=crates/clawbell/clawbell_bin.cdx.json
@@ -11,7 +15,7 @@ trap 'rm -f "$generated"' EXIT
 lock_before=$(sha256sum Cargo.lock)
 CARGO_NET_OFFLINE=true cargo cyclonedx --manifest-path crates/clawbell/Cargo.toml \
   --format json --spec-version 1.5 --describe binaries \
-  --target x86_64-unknown-linux-gnu
+  --target "$host"
 test "$lock_before" = "$(sha256sum Cargo.lock)"
 mkdir -p target/package
 # Cargo package IDs contain absolute builder paths. Replace only local component

@@ -1,3 +1,22 @@
+# clawbell 0.1.1 — native Linux releases and explicit host installation
+
+- Package x86-64 and AArch64 separately, with architecture-specific CycloneDX SBOM,
+  checksums, provenance/SBOM bundles and evaluation report. Publication requires
+  both native enforcement/latency and clean-host installation gates, then verifies
+  both attestation predicates for each archive.
+- Add a source installer for Fedora 44/Ubuntu 24.04, checksum-pinned Rustup, locked
+  builds, namespace-capable bubblewrap, persistent owner lingering/delegation,
+  private policy/workspace/state and reversible client binding. No global namespace
+  restriction is disabled by the installer. Conflicting owner files refuse.
+- Measure synthetic permitted workflow completion and DLP false alarms, process-cold
+  startup, packet/RTT p95/p99 and directly timed FULL durable-audit events. Reports
+  preserve false alarms and bind the exact source, binary and platform.
+- macOS/Windows production NativeRunner adapters and their native test certification
+  remain unavailable. These platforms continue to fail closed. This Linux release
+  does not represent completion of that requested cross-platform work.
+- See [installation](installation.md), [evaluation](evaluation.md) and
+  [ADR 0017](adr/0017-native-releases-and-host-provisioning.md) for migration and limits.
+
 # Release security and actionable host errors
 
 - Distribute the MIT license and private vulnerability reporting policy.

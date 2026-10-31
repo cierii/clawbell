@@ -1,4 +1,4 @@
-name: MVP checks and Linux release
+name: Checks and native Linux releases
 on:
   pull_request:
   push:
@@ -29,10 +29,6 @@ jobs:
         run: cargo audit --file Cargo.lock
   checks:
     if: github.event_name != 'schedule'
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -57,50 +53,16 @@ jobs:
         run: cargo test --locked --release -p clawbell complete_mvp_gate_packets_under_five_ms -- --ignored --nocapture
       - name: Broker packet budget (policy, DLP, durable audit and loopback)
         run: cargo test --locked --release -p clawbell-proxy broker_packets_under_five_ms -- --ignored --nocapture
-      - name: Install pinned SBOM generator
-        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
-      - name: Package Linux MVP
-        run: bash scripts/package-release.sh
-      - name: Attest binary and archive build provenance
-        if: startsWith(github.ref, 'refs/tags/v')
-        id: provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-path: |
-            target/package/clawbell-*/clawbell
-            target/package/*.tar.gz
-      - name: Attest binary and archive SBOM
-        if: startsWith(github.ref, 'refs/tags/v')
-        id: sbom
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
-        with:
-          subject-path: |
-            target/package/clawbell-*/clawbell
-            target/package/*.tar.gz
-          sbom-path: target/package/clawbell.cdx.json
-      - name: Preserve verification bundles
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
-          SBOM_BUNDLE: ${{ steps.sbom.outputs.bundle-path }}
-        run: |
-          install -m 0644 "$PROVENANCE_BUNDLE" target/package/provenance.sigstore.json
-          install -m 0644 "$SBOM_BUNDLE" target/package/sbom.sigstore.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: linux-mvp
-          path: |
-            target/package/*.tar.gz
-            target/package/*.sha256
-            target/package/*.json
-          if-no-files-found: error
-          retention-days: 14
   native:
     if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -126,9 +88,111 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       - name: Native containment, attacks and latency release gates
         run: bash scripts/check-release.sh
+      - name: Measure completion, DLP false alarms, startup and separate durable audit cost
+        run: python3 scripts/evaluate.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: evaluation-${{ matrix.arch }}
+          path: target/evaluation/report.json
+          if-no-files-found: error
+          retention-days: 14
+  installer:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Provision, build, bind, restore and restart persistent delegation
+        env:
+          CLAWBELL_DISPOSABLE_HOST: 'yes'
+        run: bash scripts/test-install-clean.sh
+  package:
+    if: github.event_name != 'schedule'
+    needs: [checks, native, installer, dependencies]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build the locked native binary
+        run: |
+          toolchain=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+          rustup toolchain install "$toolchain" --profile minimal
+          cargo build --workspace --release --locked
+      - name: Install pinned SBOM generator
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: evaluation-${{ matrix.arch }}
+          path: target/evaluation
+      - name: Package native Linux release
+        id: package
+        run: |
+          bash scripts/package-release.sh
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          name="clawbell-$version-linux-$(uname -m)"
+          python3 scripts/check-evaluation.py target/evaluation/report.json target/release/clawbell
+          install -m 0644 target/evaluation/report.json "target/package/$name.evaluation.json"
+          (cd target/package && sha256sum "$name.evaluation.json" > "$name.evaluation.json.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Attest binary and archive build provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            target/package/clawbell-*/clawbell
+            target/package/*.tar.gz
+            target/package/*.evaluation.json
+      - name: Attest binary and archive SBOM
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            target/package/clawbell-*/clawbell
+            target/package/*.tar.gz
+          sbom-path: target/package/${{ steps.package.outputs.name }}.cdx.json
+      - name: Preserve verification bundles
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom.outputs.bundle-path }}
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+        run: |
+          install -m 0644 "$PROVENANCE_BUNDLE" "target/package/$PACKAGE_NAME.provenance.sigstore.json"
+          install -m 0644 "$SBOM_BUNDLE" "target/package/$PACKAGE_NAME.sbom.sigstore.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            target/package/*.tar.gz
+            target/package/*.sha256
+            target/package/*.json
+          if-no-files-found: error
+          retention-days: 14
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [checks, native, dependencies]
+    needs: [package]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -140,7 +204,8 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: linux-mvp
+          pattern: linux-*
+          merge-multiple: true
           path: release
       - name: Validate version, checksums and publish immutable tag artifacts
         env:
@@ -150,6 +215,10 @@ jobs:
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           test "$RELEASE_TAG" = "v$version"
           (cd release && sha256sum --check ./*.sha256)
-          gh attestation verify release/*.tar.gz --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$GITHUB_SHA"
-          gh attestation verify release/*.tar.gz --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$GITHUB_SHA" --predicate-type https://cyclonedx.org/bom
+          for arch in x86_64 aarch64; do
+            archive="release/clawbell-$version-linux-$arch.tar.gz"
+            test -f "$archive"
+            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$GITHUB_SHA"
+            gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$GITHUB_SHA" --predicate-type https://cyclonedx.org/bom
+          done
           gh release create "$RELEASE_TAG" release/* --verify-tag --title "clawbell $version MVP" --notes-file docs/release-notes.md

@@ -1,3 +1,80 @@
+# Handoff — 2026-10-31: Linux release matrix, host provisioning and evaluation
+
+This session prepares version 0.1.1. Linux x86-64/AArch64 have separate packaging,
+SBOMs, checksums, bundles and evaluation artifacts. Native and disposable installer
+jobs gate package jobs; publication validates each archive with both provenance and
+CycloneDX predicates. Actions are pinned to immutable revisions. The tag must match
+Cargo workspace/lockfile versions. No production packet-path code changed.
+
+Added source installer: reviewed Fedora 44/Ubuntu 24.04 checkout, signed system
+packages, checksum-pinned Rustup, locked build, compatible pinned bubblewrap when
+needed, executable-specific AppArmor namespace permission when missing, lingering,
+persistent user service with boot/restart controller preparation, private versioned
+binary/policy/workspace/state and reversible binding. Directory creation uses
+pinned no-follow directory descriptors. Existing conflicts refuse. No persistent
+host installer was run on the owner's desktop. Existing bootstrap units need an
+explicit reviewed migration; old backups/state are not deleted.
+
+Actual local verification:
+- MCP Context7: official GitHub Actions attestations, systemd delegation/lingering,
+  Docker network/resource/lifecycle documentation. ADR 0017 records boundaries.
+- Full scripts/check-release.sh passed on Linux x86-64: locked fetch, fmt, denied-
+  warning Clippy, workspace tests/build, CLI smoke, remote monitor, all packet
+  budgets, actual native memory/lifecycle/SSH, five CLI attacks, scanned skills,
+  broker, transactional publication/refusals, diagnostics and audit-loss refusal.
+- Final scripts/check-local.sh passed after the Rust evaluation changes. Final
+  installer tests (7) and report publication validation tests passed, including
+  link/no-write refusal, conflicts, startup order and no bind after failed probe.
+- Actual temporary delegated user service ran the installer's helper on initial
+  start and restart with cpu/memory/pids present; service was stopped afterward.
+- Final independent evaluate.py run passed against final relevant source bytes,
+  including real native tests. check-evaluation.py verified source/binary/commit,
+  sample counts and budgets. Raw logs remain ignored under target/evaluation.
+- docs/evaluation.md and its JSON retain all observed false alarms: 11/20 unchanged
+  benign stress workflows, 7 false refusals and 2 false redactions. Separate repeated
+  native allowed reads completed 2200/2200. No field population rate is claimed.
+- Final gate: p95 0.309 ms, p99 0.336 ms, max 1.416 ms (4000 packets). Native CLI
+  RTT: p95 0.594 ms, p99 0.644 ms, max 1.626 ms (2000 samples). Every measured
+  warmed packet/RTT remained <5 ms. Process-cold start p95 60.732/p99 64.037 ms
+  (20 starts, warm OS caches and accepted pins).
+- Separately timed FULL durable intent/response p99 0.192/0.196 ms (2000 each).
+  This is actual writer acknowledgement cost, not subtracted percentiles.
+- Pinned cargo-cyclonedx 0.5.9 generated a normalized native graph; local archive,
+  ELF architecture, binary/report identity, included documentation and SHA-256
+  verification passed. Local packaging creates no remote attestation.
+- Current RustSec scan passed (1395 advisories, 274 dependencies). Fetched all
+  origin refs and scanned all 20 prior commits with Gitleaks: no findings. Exact
+  final index is scanned before commit; secret absence is not an absolute proof.
+- Python/Bash syntax, workflow parsing/dependency graph/pinned revisions, diff
+  whitespace and documentation links checked. AGENTS.md stays 199 lines. No UI
+  exists or changed; npm/browser checks are not applicable.
+
+Outstanding acceptance items and limits:
+- macOS/Windows production NativeRunner adapters were NOT implemented or certified.
+  They remain fail-closed. No target hosts/runtime were available. Windows also
+  requires porting the existing Unix-only CLI/private file/IPC boundaries. Do not
+  replace these requirements with a Docker CLI or unverified Seatbelt fallback.
+- Native AArch64 and clean-host installation are scheduled as actual CI gates,
+  not claimed locally passed. Only temporary service/helper tests ran on Fedora;
+  a complete clean-host provisioning run was not executed on the owner's host.
+- SSH fetch/push access works outside the tool sandbox. GitHub connector returned
+  404 for cierii/clawbell; no GH_TOKEN/GITHUB_TOKEN or authenticated gh was available.
+  No browser session was available. Tagged Actions, published assets and remote
+  SBOM/provenance verification must be inspected through authorized GitHub access.
+  A pushed tag alone must not be reported as a successfully published release.
+- The two pre-existing untracked owner documents are untouched and excluded from
+  the commit. Runtime databases, doctor evidence and Python caches stay ignored.
+
+Next: inspect exact branch/tag refs and tagged workflow with authorized GitHub
+access; resolve any real native/installer/attestation failures without weakening
+security. For macOS/Windows, obtain actual native hosts, choose a trusted Linux VM/
+image boundary and implement/test whole-tree limits, cancellation/drop/owner-death
+and daemon-failure cleanup plus the platform private-file/IPC port. See ADR 0017.
+The final assistant delivery message and Git refs record commit/push outcome;
+this handoff deliberately makes no claim of remote CI or release success.
+
+---
+
 # Handoff — 2026-10-31: sandbox broker, complete catalogs and HTTP/OAuth lifecycle
 
 ## Delivered

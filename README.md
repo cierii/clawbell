@@ -8,6 +8,24 @@ claim to recognize every malicious instruction or arbitrary encoded secret.
 
 ## Install and bind a client
 
+For a reviewed source checkout on Fedora 44 or Ubuntu 24.04, one invocation
+provisions system dependencies, a checksum-pinned Rustup/toolchain, sufficiently
+recent bubblewrap, lingering, persistent delegation, private policy/workspace/state,
+a versioned binary and reversible client bindings:
+
+```bash
+bash scripts/install.sh --config /absolute/path/client.json \
+  --workspace /absolute/path/credential-free-server
+```
+
+Run as the owner with Bash, sudo access and HTTPS connectivity. The workspace must
+be private and credential-free. Omitting `--workspace` prepares an empty private
+directory. The supplied default-deny policy requires owner review before tools can
+run. See [installation and recovery](docs/installation.md) for exact host changes,
+limitations and removal. macOS/Windows execution remains unavailable; the installer
+refuses those hosts. The disposable-VM integration gate runs on both Linux CPU
+architectures. Local test results do not certify a clean installation on another OS.
+
 Use the Rust version pinned in `rust-toolchain.toml`:
 
 ```bash
@@ -625,8 +643,12 @@ A failed budget must fail release checks, never trigger a weaker durability mode
 GitHub Actions runs format/lint/tests/build, a pinned checksum-verified gitleaks
 history/index scan, production gate latency and native Linux enforcement on
 ephemeral hosted x86-64 and AArch64 Linux runners. Native CI builds pinned bubblewrap 0.12.0 and provisions
-namespace/cgroup prerequisites; unavailable facilities fail the job. A `v0.1.0` tag
-publishes a checksummed Linux x86-64 archive only after both jobs pass. No tag is
+namespace/cgroup prerequisites; unavailable facilities fail the job. A matching
+version tag publishes separate checksummed Linux x86-64 and AArch64 archives only
+after dependency, common, native and clean-host installer gates pass. Each
+architecture has its own SBOM, provenance/SBOM bundles and evaluation JSON. The
+publisher verifies both attestation predicates for each archive before publication.
+No tag is
 created by `init`, and dependencies/skills never auto-update. Git ignores runtime
 state, installer backups, `.env` files and common private-key files. Secret scanning
 cannot prove absence of every secret or erase remote copies/forks.
@@ -732,12 +754,19 @@ bash scripts/package-release.sh
 
 Build and verify the release binary first with `bash scripts/check-release.sh`.
 Packaging generates a CycloneDX 1.5 JSON SBOM using offline Cargo metadata for the
-same x86-64 Linux/default-feature binary graph, includes it with LICENSE and
+same native x86-64 or AArch64 Linux/default-feature binary graph, includes it with LICENSE and
 SECURITY.md in the archive, and publishes a separate SBOM and checksums. Tagged
 GitHub builds attest both the binary and archive with provenance and the SBOM;
 local packaging does not create attestations. Follow SECURITY.md before running
 a downloaded release. The SBOM includes Rust production/build dependencies; it
 is not a complete inventory of host tools or bundled C code.
+
+To reproduce completion, DLP false-alarm, process-cold startup, p95/p99 and separately
+timed FULL durable-audit measurements, run `python3 scripts/evaluate.py` on an idle
+namespace-capable Linux user session with persistent user-manager access. The
+exclusive output is `target/evaluation/report.json`; raw local test logs remain
+ignored. See the [evaluation report](docs/evaluation.md) for the measured corpus,
+results and limits. A failed measurement or 5 ms packet gate prevents a new report.
 
 ## Safe error diagnostics
 
