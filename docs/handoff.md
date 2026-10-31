@@ -1,3 +1,33 @@
+# Handoff — 2026-10-31: clean-host CI user-bus regression
+
+The disposable installer gate now exports the owner's XDG_RUNTIME_DIR and
+DBUS_SESSION_BUS_ADDRESS before its post-installation user-service restart.
+The Python installer only sets its own subprocess environment; those values
+cannot propagate back to the non-login Actions shell. A regression runs the
+actual gate against private command fixtures with both variables absent. It
+failed before the fix and passes afterward, preserving failure propagation and
+temporary-configuration cleanup. No production packet-path code changed.
+
+Verified: all eight installer tests, evaluation validation, Bash syntax,
+actionlint 1.7.7, diff whitespace and unchanged 199-line AGENTS.md. The complete
+check-local.sh and check-release.sh passed on Linux x86-64. Measured maximum
+gate packet 0.493 ms, broker packet 1.342 ms and full native CLI RTT 1.619 ms;
+every measured packet stayed below 5 ms. Tests ran outside the tool sandbox's
+filesystem/socket restrictions without weakening product containment. Gitleaks
+8.30.1 found no findings in all 21 fetched commits or the tracked candidate.
+MCP Context7 supplied official Actions and systemd documentation.
+
+Remote status remains unverified: SSH access works, but the GitHub connector and
+unauthenticated REST API return 404, no GitHub token or browser is available.
+The owner reported five failing Linux release checks; exact failing steps/logs
+were requested. This reproduced fix does not establish that all five failures
+are resolved. Clean Ubuntu provisioning and native AArch64 were not run locally.
+Next: inspect those logs and the pushed workflow, fix any remaining failures,
+then verify native/installer/package jobs. Do not move existing release tags.
+The two pre-existing untracked owner documents remain untouched and excluded.
+
+---
+
 # Handoff — 2026-10-31: Linux release matrix, host provisioning and evaluation
 
 This session prepares version 0.1.1. Linux x86-64/AArch64 have separate packaging,

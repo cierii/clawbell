@@ -20,6 +20,10 @@ PY
 "$binary" unbind --config "$temporary/client.json"
 cmp "$temporary/client.json" "$temporary/original.json"
 [[ $(loginctl show-user "$(id -u)" -p Linger --value) == yes ]]
+# The Python installer configures its own child environment. Non-login CI shells
+# must connect to that same owner user manager explicitly after it returns.
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 # Exercise the same preparation path used after boot, not only the installation.
 systemctl --user restart clawbell-delegation.service
 relative=$(systemctl --user show clawbell-delegation.service -p ControlGroup --value)

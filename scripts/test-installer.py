@@ -1,5 +1,6 @@
 """Host-write refusal and provisioning contract tests; no sudo or network."""
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -13,6 +14,64 @@ SPEC.loader.exec_module(INSTALLER)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_clean_host_gate_reconnects_to_user_manager_without_login_environment(self):
+        """The installer child cannot export its session into the CI parent shell.
+
+        Stop at a fake restart: this test never provisions the host or touches
+        real services/cgroups. All files, including shell cleanup, stay private.
+        """
+        script = Path(__file__).with_name("test-install-clean.sh").resolve()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commands = root / "bin"
+            commands.mkdir()
+            (root / "scripts").mkdir()
+            data = root / "data"
+            data.mkdir()
+            fixtures = {
+                "mktemp": 'printf "%s\\n" "$CLAWBELL_FIXTURE_DATA"\n',
+                "loginctl": 'printf "%s\\n" yes\n',
+                "systemctl": '''test "$*" = '--user restart clawbell-delegation.service' || exit 74
+test "${XDG_RUNTIME_DIR:-}" = "/run/user/$(id -u)" || exit 75
+test "${DBUS_SESSION_BUS_ADDRESS:-}" = "unix:path=$XDG_RUNTIME_DIR/bus" || exit 76
+printf '%s\\n' user_manager_session_verified
+exit 73
+''',
+            }
+            for name, body in fixtures.items():
+                target = commands / name
+                target.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body)
+                target.chmod(0o700)
+            binary = commands / "clawbell"
+            binary.write_text('''#!/usr/bin/env python3
+import shutil
+import sys
+from pathlib import Path
+assert sys.argv[1:3] == ['unbind', '--config']
+config = Path(sys.argv[3])
+shutil.copyfile(config.with_name('original.json'), config)
+''')
+            binary.chmod(0o700)
+            (root / "scripts/install.sh").write_text('''python3 - "$2" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({'mcpServers': {'fixture': {
+    'command': os.environ['CLAWBELL_FIXTURE_BINARY']}}}))
+PY
+''')
+            environment = os.environ.copy()
+            for name in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+                environment.pop(name, None)
+            environment.update(PATH=f"{commands}:{os.defpath}", CLAWBELL_DISPOSABLE_HOST="yes",
+                               CLAWBELL_FIXTURE_DATA=str(data), CLAWBELL_FIXTURE_BINARY=str(binary))
+            result = subprocess.run(["bash", str(script)], cwd=root, env=environment,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 73, result.stderr)
+            self.assertIn("user_manager_session_verified", result.stdout)
+            self.assertFalse(data.exists(), "the gate must clean up its temporary configuration")
+
     def test_exclusive_write_preserves_owner_data_and_refuses_links(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
