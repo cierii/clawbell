@@ -1,3 +1,68 @@
+# Handoff — 2026-11-01: native CI repairs and installer diagnostics
+
+The owner supplied five failing Actions jobs and authorized fixes, secret review,
+commit and push. Two pre-existing untracked owner documents remain untouched and
+excluded. AGENTS.md remains unchanged (199 lines).
+
+Implemented:
+- MemoryGuard mounts only existing /lib and /lib64 directories read-only, matching
+  the native runner and avoiding Ubuntu AArch64's absent /lib64.
+- The native SSH/lifecycle test reads its child's actual unified cgroup membership;
+  directory-difference discovery could select another concurrently running test's
+  group. After Drop it waits up to five seconds for actual populated=0 or removal,
+  without accepting other read errors. A nonprivileged regression proves populated=1
+  does not pass and that empty/reclaimed groups do pass.
+- Installer subprocesses report static stage and exit/timeout/spawn status without
+  arguments, owner paths or captured output. Regression tests cover all failure
+  classes and reject malformed diagnostic labels before execution. Installation
+  documentation explains the output and retained provisioning.
+
+Verified on Fedora 44 x86-64 with pinned Rust 1.99.1 and bubblewrap 0.12.0:
+- check-local.sh passed: nine installer tests, evaluation-validation test, locked
+  fetch, fmt, Clippy all targets/-D warnings, workspace tests, release build and
+  CLI help/policy checks.
+- Explicit memory attack and test-native-linux.sh passed in a real delegated user
+  scope: all six native attacks/lifecycle/resource tests, transport RTT gate, full
+  CLI attacks, scan-bound skills, broker, transactions, doctor and demo.
+- Transport RTT maximum 0.796 ms; full CLI/native/audit/DLP/policy RTT maximum
+  1.092 ms (2000 warmed samples). These fixtures use the host default temporary
+  filesystem; they do not certify persistent-disk audit latency.
+- Persistent btrfs TMPDIR=target/ci-latency production gate FAILED: 4000 packets,
+  p95 1.442 ms, nearest-rank p99 2.871 ms, maximum 17.691 ms. The strict maximum
+  remains unchanged. No retries, filtered samples or weaker durability introduced.
+- Separate durable audit experiment on the same persistent filesystem: intent
+  maximum 5.182 ms and response maximum 30.318 ms (2000 samples each). This isolates
+  the audit path including writer scheduling/storage; it does not distinguish
+  checkpoint, fsync and scheduler contributions. Performance remains unresolved.
+- Persistent-disk broker packet gate also FAILED: p99 4.426 ms, maximum 7.408 ms.
+- A separate diagnostic-only LD_PRELOAD interposer in /tmp measured fsync calls
+  without changing repository code or disabling synchronization: longest fsync
+  70.793 ms; instrumented gate maximum 71.099 ms. This run is diagnostic, not a
+  release result. A required synchronization syscall itself exceeded the budget.
+- Gitleaks 8.30.1 (verified against CI's pinned checksum) scanned all 23 fetched
+  commits and the exact staged candidate with no findings. Rescan after any edit.
+- Bash syntax, changed documentation links and diff whitespace passed.
+
+Open work:
+- GitHub API, including repository metadata, returns 404, although SSH fetch works.
+  The owner was instructed to configure the existing Codex/ChatGPT GitHub App with
+  Only select repositories: cierii/clawbell. No token was requested in chat.
+  After the owner confirms access, inspect combined commit checks and job logs.
+- Clean Ubuntu provisioning and native AArch64 were not run locally. The provided
+  installer log hides the failing stage, so diagnostics are preparation, not a
+  claimed fix for the unknown installer failure. Do not run its destructive clean
+  host gate on the owner's Fedora desktop.
+- The >5 ms persistent audit tail must remain a failing release check until a
+  measured fix or an explicit owner decision on deployment/requirements. Passing
+  tmpfs/native RTTs are not a substitute. Do not publish a release or move tags.
+
+Context7 supplied Rust timing and systemd v255 delegation documentation, and
+GitHub App repository-access configuration instructions. Local Rust/scanner tools
+are under /tmp/clawbell-{cargo,rustup,gitleaks}; use the matching CARGO_HOME,
+RUSTUP_HOME and PATH when resuming.
+
+---
+
 # Handoff — 2026-10-31: durable disk audit latency
 
 The owner supplied the actual Actions failure: 4000 production gate packets,

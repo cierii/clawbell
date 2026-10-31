@@ -50,25 +50,28 @@ impl MemoryGuard {
                 .try_clone()
                 .map_err(|_| LaunchError::IsolationUnavailable)?,
         ));
+        command.args([
+            "--unshare-all",
+            "--unshare-user",
+            "--disable-userns",
+            "--die-with-parent",
+            "--new-session",
+            "--cap-drop",
+            "ALL",
+            "--clearenv",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+        ]);
+        // Runtime library directories differ between x86-64 and AArch64.
+        // Match the native runner: expose existing directories read-only only.
+        for path in ["/lib", "/lib64"] {
+            if Path::new(path).exists() {
+                command.args(["--ro-bind", path, path]);
+            }
+        }
         command
             .args([
-                "--unshare-all",
-                "--unshare-user",
-                "--disable-userns",
-                "--die-with-parent",
-                "--new-session",
-                "--cap-drop",
-                "ALL",
-                "--clearenv",
-                "--ro-bind",
-                "/usr",
-                "/usr",
-                "--ro-bind",
-                "/lib",
-                "/lib",
-                "--ro-bind",
-                "/lib64",
-                "/lib64",
                 "--proc",
                 "/proc",
                 "--dev",

@@ -63,6 +63,21 @@ completed host setup and any earlier bindings. Output never dumps client JSON or
 captured subprocess stderr. Package-manager bootstrap output, if Python is absent,
 contains package diagnostics only. Review sudo/package-manager errors locally.
 
+## Failure diagnostics
+
+Each subprocess reports a fixed `installer_step=<stage>` to stderr before it
+starts. Failure reports the same stage and `status=exit_<code>`, `timeout` or
+`spawn_failed`. Arguments, owner paths, client content and captured stdout/stderr
+are never included. For example, `step=delegation_start` identifies user-service
+startup, while `step=containment_probe` identifies the mandatory native self-test.
+A progress line is not a success acknowledgement; only `installation_complete`
+confirms the entire installation and binding sequence completed.
+
+Use the reported stage to inspect the relevant package manager, toolchain or user
+service locally. Review diagnostic data before sharing it. A failed stage retains
+completed provisioning and does not authorize overwriting conflicting files or
+bypassing the isolation probe. Rerun only after resolving the reported prerequisite.
+
 ## Repetition, upgrades and removal
 
 Repeating installation with identical settings is idempotent. Conflicting existing

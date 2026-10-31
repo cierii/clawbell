@@ -3,7 +3,11 @@ use clawbell_sandbox::{
     Runner,
     native::{NativeConfig, NativeRunner, ResourceLimits},
 };
-use std::{fs, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -79,19 +83,22 @@ async fn malicious_mcp_cannot_read_ssh_key() -> Result {
     // the absolute deadline, even while the server keeps the transport alive.
     for mode in ["terminate", "drop", "deadline"] {
         let parent = PathBuf::from(std::env::var("CLAWBELL_TEST_CGROUP")?);
-        let before: std::collections::HashSet<_> = fs::read_dir(&parent)?
-            .map(|e| e.map(|e| e.path()))
-            .collect::<std::io::Result<_>>()?;
         let mut settings = config(root.join("workspace"), parent.clone(), vec![
             "-c".into(), "import os,time; pid=os.fork(); os.setsid() if pid == 0 else None; print('ready',flush=True); time.sleep(60)".into()
         ]);
         settings.limits.lifetime = Duration::from_secs(1);
         let mut runner = NativeRunner::new(settings)?;
-        let group = fs::read_dir(&parent)?
-            .filter_map(std::result::Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| !before.contains(path))
-            .ok_or("missing group")?;
+        let mut child = runner.spawn().await?;
+        // Other native tests create cgroups concurrently. Identify this child's
+        // actual membership instead of selecting an unrelated newly seen group.
+        let pid = child.id().ok_or("missing child pid")?;
+        let membership = fs::read_to_string(format!("/proc/{pid}/cgroup"))?;
+        let relative = membership
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .ok_or("missing unified cgroup membership")?;
+        let group = PathBuf::from(format!("/sys/fs/cgroup{relative}"));
+        assert_eq!(group.parent(), Some(fs::canonicalize(&parent)?.as_path()));
         assert_eq!(
             fs::read_to_string(group.join("memory.max"))?.trim(),
             "268435456"
@@ -101,7 +108,6 @@ async fn malicious_mcp_cannot_read_ssh_key() -> Result {
             "0"
         );
         assert_eq!(fs::read_to_string(group.join("pids.max"))?.trim(), "32");
-        let mut child = runner.spawn().await?;
         let stdout = child.stdout.take().ok_or("missing stdout")?;
         let mut lines = BufReader::new(stdout).lines();
         for _ in 0..2 {
@@ -123,16 +129,50 @@ async fn malicious_mcp_cannot_read_ssh_key() -> Result {
             drop(runner);
         }
         tokio::time::timeout(Duration::from_secs(5), child.wait()).await??;
-        if group.exists() {
-            match fs::read_to_string(group.join("cgroup.events")) {
-                Ok(events) => assert!(events.contains("populated 0")),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-            // Cleanup may finish concurrently on the runner's reaper thread.
-        }
+        // Reaping the direct child does not wait for detached descendants.
+        // Drop kills synchronously, but kernel exit and cgroup reclamation are
+        // asynchronous. Require actual emptiness/removal within a fixed deadline.
+        wait_for_empty_group(&group).await?;
     }
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+/// cgroup.kill and direct-child wait do not synchronize descendant exit.
+async fn wait_for_empty_group(group: &Path) -> Result {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match fs::read_to_string(group.join("cgroup.events")) {
+                Ok(events) if events.lines().any(|line| line == "populated 0") => break,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleanup_observation_waits_for_descendants_and_accepts_reclaimed_group() -> Result {
+    let group = std::env::temp_dir().join(format!("clawbell-cleanup-{}", std::process::id()));
+    fs::create_dir(&group)?;
+    let events = group.join("cgroup.events");
+    fs::write(&events, "populated 1\nfrozen 0\n")?;
+    let wait = wait_for_empty_group(&group);
+    tokio::pin!(wait);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut wait)
+            .await
+            .is_err()
+    );
+    fs::write(&events, "populated 0\nfrozen 0\n")?;
+    wait.await?;
+    fs::remove_file(events)?;
+    fs::remove_dir(&group)?;
+    wait_for_empty_group(&group).await?;
     Ok(())
 }
 

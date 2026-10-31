@@ -1,5 +1,7 @@
 """Host-write refusal and provisioning contract tests; no sudo or network."""
 import importlib.util
+import contextlib
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -121,11 +123,31 @@ PY
             self.assertEqual(created.parent.stat().st_mode & 0o777, 0o700)
 
     def test_subprocess_failure_never_discloses_output(self):
-        error = subprocess.CalledProcessError(1, ["fixture"], stderr=b"synthetic-private-value")
-        with patch.object(subprocess, "run", side_effect=error):
-            with self.assertRaises(INSTALLER.Refused) as caught:
-                INSTALLER.run(["fixture"])
-        self.assertEqual(str(caught.exception), "installer_step_failed")
+        errors = [
+            (subprocess.CalledProcessError(17, ["synthetic-private-argument"],
+                                          output=b"synthetic-private-output",
+                                          stderr=b"synthetic-private-error"), "exit_17"),
+            (subprocess.TimeoutExpired(["synthetic-private-argument"], 1,
+                                       output=b"synthetic-private-output"), "timeout"),
+            (OSError("synthetic-private-path"), "spawn_failed"),
+        ]
+        for error, status in errors:
+            with self.subTest(status=status):
+                output = io.StringIO()
+                with patch.object(subprocess, "run", side_effect=error), contextlib.redirect_stderr(output):
+                    with self.assertRaises(INSTALLER.Refused) as caught:
+                        INSTALLER.run(["synthetic-private-argument"], step="containment_probe")
+                self.assertEqual(str(caught.exception),
+                                 f"installer_step_failed; step=containment_probe; status={status}")
+                self.assertEqual(output.getvalue(), "installer_step=containment_probe\n")
+
+    def test_invalid_diagnostic_step_never_executes_or_prints(self):
+        output = io.StringIO()
+        with patch.object(subprocess, "run") as run, contextlib.redirect_stderr(output):
+            with self.assertRaises(INSTALLER.Refused):
+                INSTALLER.run(["fixture"], step="synthetic-private-path\n")
+            run.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
 
     def test_service_prepares_controllers_on_every_boot(self):
         unit = INSTALLER.service(Path('/private/owner% name/"delegate.py')).decode()
