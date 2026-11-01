@@ -289,7 +289,26 @@ impl OperationStore {
         result.await.map_err(|_| AuditError)?
     }
 }
+// Serialize journal-mode setup across processes before touching SQLite. SQLite
+// can return BUSY immediately for concurrent journal-mode upgrades even with a
+// busy handler. This runs on the dedicated writer, never the production runtime.
+fn initialization_lock(directory: &Path) -> Result<std::fs::File, AuditError> {
+    let started = std::time::Instant::now();
+    loop {
+        match crate::storage::lock(directory, "operations-init.lock", true) {
+            Ok(lock) => return Ok(lock),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && started.elapsed() < std::time::Duration::from_millis(100) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(_) => return Err(AuditError),
+        }
+    }
+}
 fn open(directory: &Path) -> Result<Connection, AuditError> {
+    let _initialization = initialization_lock(directory)?;
     let _file =
         crate::storage::private(directory, "operations.sqlite3", true).map_err(|_| AuditError)?;
     // Existing sidecars may contain committed or recovery state. Validate them
@@ -471,6 +490,42 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn initialization_contention_refuses_before_database_creation_and_releases() -> Result {
+        let dir = Directory::new()?;
+        let lease = crate::storage::lock(&dir.0, "operations-init.lock", true)?;
+        assert!(open(&dir.0).is_err());
+        assert!(!dir.0.join("operations.sqlite3").exists());
+        drop(lease);
+        let connection = open(&dir.0)?;
+        assert_eq!(
+            connection.query_row("PRAGMA synchronous", [], |row| row.get::<_, u32>(0))?,
+            2
+        );
+        Ok(())
+    }
+    #[test]
+    fn unsafe_initialization_lock_refuses_without_touching_database_or_target() -> Result {
+        for kind in ["symlink", "hardlink", "permissions"] {
+            let dir = Directory::new()?;
+            let target = dir.0.join("synthetic-target");
+            std::fs::write(&target, b"unchanged synthetic value")?;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+            let lock = dir.0.join("operations-init.lock");
+            match kind {
+                "symlink" => std::os::unix::fs::symlink(&target, &lock)?,
+                "hardlink" => std::fs::hard_link(&target, &lock)?,
+                _ => std::fs::write(&lock, b"public lock")?,
+            }
+            if kind == "permissions" {
+                std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644))?;
+            }
+            assert!(open(&dir.0).is_err());
+            assert!(!dir.0.join("operations.sqlite3").exists());
+            assert_eq!(std::fs::read(&target)?, b"unchanged synthetic value");
+        }
+        Ok(())
     }
     #[test]
     fn wal_keeps_full_sync_private_storage_and_bounded_retention() -> Result {

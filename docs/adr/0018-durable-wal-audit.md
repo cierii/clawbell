@@ -132,3 +132,21 @@ acceptance-budget change, not a performance improvement or a real-time guarantee
 Boundary regressions accept the earlier 30.213244 ms measurement and 39,999,999 ns,
 and reject 40,000,000 ns and 40,000,001 ns for both report packet metrics.
 Publish as v0.1.3; never move the earlier v0.1.2 source tag.
+
+## Concurrent initialization follow-up (v0.1.4)
+
+The ARM64 v0.1.3 job failed the concurrent legacy migration test before latency
+measurements. Local reproduction identified SQLite DatabaseBusy at the initial
+journal-mode/schema batch. SQLite does not guarantee invoking its busy handler
+for journal-mode lock upgrades. Serialize initialization with a new private
+`operations-init.lock`, using the existing no-follow/single-link/0600 file checks.
+Only contention waits, for at most 100 ms; every other failure refuses immediately.
+The dedicated writer holds the lease through connection setup/migration and then
+releases it. This is not a retry of a tool effect or a relaxation of a test.
+Existing maintenance leases, SQLite write transactions, FULL acknowledgement, WAL
+budgets and all packet-path limits remain intact. Unsafe/held lock regressions
+verify refusal before any database creation or modification of a link target.
+New binaries cooperate through this file; stop older sessions before upgrading,
+as older binaries do not participate in the initialization lease.
+
+Context7 reconfirmed SQLite's [busy-handler limitations](https://www.sqlite.org/c3ref/busy_handler.html).

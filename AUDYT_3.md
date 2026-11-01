@@ -283,3 +283,14 @@ regressions are updated together under ADR 0018. The earlier v0.1.2 CI failure
 remains a failure under its original contract. v0.1.3 must pass all gates and
 artifact attestations independently; the budget change alone does not establish
 publication or improve runtime performance.
+
+## Publication follow-up: concurrent audit initialization
+
+The v0.1.3 ARM64 job failed before latency tests in the concurrent legacy migration
+test. Local reproduction identified SQLite DatabaseBusy during the initial WAL
+pragma/schema batch. v0.1.4 serializes connection initialization using a private
+cross-process lease, with bounded contention waiting on the dedicated writer and
+fail-closed validation before database creation. FULL audit and p99 <40 ms /
+maximum <1 s remain intact. Full audit tests and 80 repeated migration regressions
+passed locally; new tests cover contention refusal and unsafe initialization lock
+files without database/target modification. See ADR 0018 for upgrade requirements.

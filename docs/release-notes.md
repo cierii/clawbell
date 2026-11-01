@@ -1,3 +1,13 @@
+# 0.1.4 — Serialize concurrent audit initialization
+
+- Serialize SQLite journal-mode setup and additive migrations with a private
+  cross-process initialization lease. Contention waits at most the existing
+  100 ms startup-lock budget before refusal; unsafe lock files refuse before
+  database creation. Dedicated writers retain FULL durability and bounded queues.
+- Fix the independently reproduced concurrent migration failure observed in the
+  ARM64 v0.1.3 CI job. Keep the owner-approved p99 <40 ms / maximum <1 s budgets.
+- Preserve failed source tags; require a fresh complete release verification.
+
 # 0.1.3 — Owner-approved durable-audit percentile budget
 
 - Change the release acceptance criterion for durable-audit measurements to

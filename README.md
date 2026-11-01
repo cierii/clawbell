@@ -8,19 +8,19 @@ claim to recognize every malicious instruction or arbitrary encoded secret.
 
 ## Try a release without compiling
 
-Release v0.1.3 uses the owner-approved p99 <40 ms durable-audit budget.
+Release v0.1.4 uses the owner-approved p99 <40 ms durable-audit budget.
 Authenticated release assets become available only after all CI gates pass.
 The earlier v0.1.2 failure remains documented in [AUDYT_3.md](AUDYT_3.md).
 
 From a reviewed checkout, with Python 3.11+ and GitHub CLI installed/authenticated:
 
 ```bash
-python3 scripts/install-release.py --version 0.1.3
+python3 scripts/install-release.py --version 0.1.4
 ```
 
 This downloads the exact Linux release, verifies its checksum, GitHub build
 provenance and SBOM attestation, runs offline version/help/scan checks, and installs
-`~/.local/share/clawbell/releases/0.1.3/clawbell`. The whole command has a 55-second
+`~/.local/share/clawbell/releases/0.1.4/clawbell`. The whole command has a 55-second
 deadline and refuses on slow downloads or failed verification. It requires the
 published release assets; a tag alone is insufficient. It does not provision the
 host or bind clients. Full protection needs the host setup below, which downloads

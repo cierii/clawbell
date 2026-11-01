@@ -48,10 +48,10 @@ Checksums detect corruption; they do not authenticate the publisher. Before
 executing downloaded code, authenticate the archive with GitHub CLI:
 
 ```bash
-sha256sum --check clawbell-0.1.3-linux-aarch64.tar.gz.sha256
-gh attestation verify clawbell-0.1.3-linux-aarch64.tar.gz \
+sha256sum --check clawbell-0.1.4-linux-aarch64.tar.gz.sha256
+gh attestation verify clawbell-0.1.4-linux-aarch64.tar.gz \
   --repo cierii/clawbell --signer-workflow cierii/clawbell/.github/workflows/ci.yml \
-  --source-ref refs/tags/v0.1.3
+  --source-ref refs/tags/v0.1.4
 ```
 
 Use the tag matching the version you downloaded. After verifying the archive, the
