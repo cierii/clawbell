@@ -46,9 +46,23 @@ failure is not yet known. Evaluation failure diagnostics now emit only fixed
 stage/status and bounded integer maxima for recognized packet metrics; malformed
 or unknown fields remain private. Three evaluation regressions and all eleven
 installer tests pass. No failed command produces a publication report or retry.
-The shared-host persistent-disk latency issue remains open; prior evidence
-includes synchronization syscalls exceeding 5 ms. The next Actions run must verify
-these diagnostics and identify the hidden native evaluation failure.
+The persistent-disk latency issue remains open. A diagnostic-only LD_PRELOAD
+observer in /tmp called the original libc fsync/fdatasync functions unchanged and
+measured 4,537 sync calls: maximum 80.220200 ms, one call >=5 ms. The same run's
+gate maximum was 80.616151 ms. Instrumented timing is diagnostic, not a release
+result. This independently demonstrates a required synchronization call exceeding
+the packet budget; software cannot acknowledge that durable write within 5 ms on
+this storage when the synchronization itself takes longer. Do not disable FULL,
+move the audit to tmpfs, discard samples or change the maximum assertion.
+
+ac74023 pushed safe evaluation-failure metrics and this handoff; Actions run
+41254845379 is in progress. The three evaluation regressions and eleven installer
+tests passed locally. The last fully inspected source run is 41253637646 on
+e925a8b, with two installer successes, two packet-budget failures and the hidden
+second-native-suite evaluation failure described above. New diagnostics still
+need remote verification. All five requested Actions jobs are NOT fixed; stable
+durable-storage latency remains a blocker, and the second native evaluation's
+exact cause remains to be read from the new failure metrics.
 
 The owner's pre-existing handoff access note and two untracked documents are
 preserved. Do not include them in a fix commit without reviewing their scope.
