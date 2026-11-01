@@ -105,8 +105,9 @@ sys.exit(17)
                         self.assertEqual(check(candidate) == 0, accepted)
             for metric in ("gate_packet", "native_cli_rtt"):
                 for percentile, accepted in [(10_000_000, True), (12_136_041, True),
-                                             (14_999_999, True), (15_000_000, False),
-                                             (15_000_001, False)]:
+                                             (15_000_000, True), (30_213_244, True),
+                                             (39_999_999, True), (40_000_000, False),
+                                             (40_000_001, False)]:
                     with self.subTest(metric=metric, p99=percentile):
                         candidate = copy.deepcopy(report)
                         candidate["metrics"][metric].update(p99=percentile, max=999_999_999)

@@ -274,3 +274,12 @@ and locally failure-tested, and its real published-asset test is configured, but
 that test cannot execute until the release gates pass. The source tag exists;
 there is no successful v0.1.2 binary release to advertise. The requested fully
 verified binary publication remains incomplete.
+
+## Owner follow-up: 40 ms budget and v0.1.3
+
+After the audit, the owner explicitly approved changing durable-audit p99 from
+<15 ms to <40 ms, retaining maximum <1 s. Tests, report validation and boundary
+regressions are updated together under ADR 0018. The earlier v0.1.2 CI failure
+remains a failure under its original contract. v0.1.3 must pass all gates and
+artifact attestations independently; the budget change alone does not establish
+publication or improve runtime performance.

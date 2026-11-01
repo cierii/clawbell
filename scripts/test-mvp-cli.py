@@ -232,7 +232,7 @@ decision = "allow"
         "process_cold_start": summary(startup_samples),
         "native_cli_rtt": measured,
         "native_allowed_reads": {"attempted": 2200, "completed": 2200}}))
-    assert measured["p99"] < 15_000_000, "full warmed RTT p99 exceeds 15 ms release budget"
+    assert measured["p99"] < 40_000_000, "full warmed RTT p99 exceeds 40 ms release budget"
     assert measured["max"] < 1_000_000_000, "full warmed RTT maximum exceeds 1 s release budget"
 
     refused("tools/call", {"name": "read_file", "arguments": {"path": "outside/.env"}})

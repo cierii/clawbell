@@ -1,3 +1,14 @@
+# 0.1.3 — Owner-approved durable-audit percentile budget
+
+- Change the release acceptance criterion for durable-audit measurements to
+  nearest-rank p99 <40 ms, retaining maximum <1 s and every measured sample.
+  Exactly either boundary fails. Non-durable budgets are unchanged.
+- Update production/remote-resource/broker/CLI gates, publication validation and
+  regression boundary checks together. FULL durable audit, isolation, policy, DLP
+  and artifact verification behavior remain unchanged.
+- Preserve the failed v0.1.2 result and immutable tag; this is a new release, not
+  a retroactive pass or a claimed runtime optimization.
+
 # 0.1.2 — Publication audit and verified binary trial
 
 - Added an exact-version Linux binary installer with checksum, build provenance

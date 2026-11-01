@@ -393,7 +393,7 @@ mod latency {
             "Broker policy/DLP/durable audit + loopback: p99 {:?}, max {:?}",
             samples[1979], samples[1999]
         );
-        assert!(samples[1979] < Duration::from_millis(15));
+        assert!(samples[1979] < Duration::from_millis(40));
         assert!(samples[1999] < Duration::from_secs(1));
         drop(broker);
         std::fs::remove_dir_all(root)?;

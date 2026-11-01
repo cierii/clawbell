@@ -115,3 +115,20 @@ Tests without durable I/O keep their existing maximum budgets. FULL durability,
 checkpointing, isolation, sample counts, warmup and inclusion of every measured
 outlier remain unchanged. This updates acceptance criteria only, not runtime
 performance or the interpretation of historical reports.
+
+## Owner-authorized 40 ms percentile update (2026-11-01)
+
+The v0.1.2 tagged checks job failed the broker gate with p99 30.213244 ms and
+maximum 198.288973 ms. This remains a failure under its original 15 ms contract.
+The owner explicitly requested a new **p99 <40 ms with maximum <1 s** criterion
+for measurements including durable audit, to permit a new verified release.
+Apply it consistently to production/remote-resource/broker gates, the full CLI
+RTT and the publication report verifier. Exactly 40 ms or exactly 1 s fails.
+Tests without durable I/O retain their current limits. No sample is removed,
+no test is retried to cherry-pick a passing run, and no audit acknowledgement,
+WAL synchronization, containment, policy or DLP behavior changes. This is an
+acceptance-budget change, not a performance improvement or a real-time guarantee.
+
+Boundary regressions accept the earlier 30.213244 ms measurement and 39,999,999 ns,
+and reject 40,000,000 ns and 40,000,001 ns for both report packet metrics.
+Publish as v0.1.3; never move the earlier v0.1.2 source tag.

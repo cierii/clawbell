@@ -82,7 +82,7 @@ def deadline(_signal, _frame):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", required=True, help="Exact reviewed release, e.g. 0.1.2")
+    parser.add_argument("--version", required=True, help="Exact reviewed release, e.g. 0.1.3")
     arguments = parser.parse_args()
     signal.signal(signal.SIGALRM, deadline)
     signal.alarm(55)

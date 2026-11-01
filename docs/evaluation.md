@@ -24,10 +24,10 @@ identify the actual audit-fixture filesystem and retain every measured outlier.
 On 2026-11-01 the owner changed the release-test budget to **<10 ms** for every
 measured warmed packet/RTT. The historical results below retain their original
 5 ms criterion. That maximum-only criterion was subsequently replaced, with owner approval, by
-**nearest-rank p99 <15 ms and maximum <1 s** for measurements including durable
+**nearest-rank p99 <40 ms and maximum <1 s** for measurements including durable
 audit. Equality fails either limit; non-durable tests retain maximum <10 ms. FULL
 durable audit and all measured outliers remain included. See
-[the budget update in ADR 0018](adr/0018-durable-wal-audit.md#owner-authorized-15-ms-percentile-update-2026-11-01).
+[the budget update in ADR 0018](adr/0018-durable-wal-audit.md#owner-authorized-40-ms-percentile-update-2026-11-01).
 
 When `scripts/evaluate.py` fails, it reports the fixed measurement index and
 exit/timeout/spawn status. Recognized packet metrics may also report a bounded

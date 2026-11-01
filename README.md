@@ -8,20 +8,19 @@ claim to recognize every malicious instruction or arbitrary encoded secret.
 
 ## Try a release without compiling
 
-Publication status: the v0.1.2 tag currently fails its CI broker latency gate.
-Authenticated release assets are unavailable until every gate passes. See
-[AUDYT_3.md](AUDYT_3.md#c-07--release-blocker-tagged-ci-broker-latency-failure).
-The source installation below remains available.
+Release v0.1.3 uses the owner-approved p99 <40 ms durable-audit budget.
+Authenticated release assets become available only after all CI gates pass.
+The earlier v0.1.2 failure remains documented in [AUDYT_3.md](AUDYT_3.md).
 
 From a reviewed checkout, with Python 3.11+ and GitHub CLI installed/authenticated:
 
 ```bash
-python3 scripts/install-release.py --version 0.1.2
+python3 scripts/install-release.py --version 0.1.3
 ```
 
 This downloads the exact Linux release, verifies its checksum, GitHub build
 provenance and SBOM attestation, runs offline version/help/scan checks, and installs
-`~/.local/share/clawbell/releases/0.1.2/clawbell`. The whole command has a 55-second
+`~/.local/share/clawbell/releases/0.1.3/clawbell`. The whole command has a 55-second
 deadline and refuses on slow downloads or failed verification. It requires the
 published release assets; a tag alone is insufficient. It does not provision the
 host or bind clients. Full protection needs the host setup below, which downloads
@@ -661,7 +660,7 @@ checks refused forwarding and unchanged synthetic host/memory fixtures. Storage,
 backup tampering, interruption, Unicode, nested Base64, invalid schemas, malformed
 protocol, socket IPC, output bounds and lifecycle failures have separate coverage.
 
-Release experiments with durable audit require **nearest-rank p99 <15 ms and
+Release experiments with durable audit require **nearest-rank p99 <40 ms and
 maximum <1 s** across all measured warmed packets/RTTs. Equality fails either
 limit. Tests without durable I/O retain their maximum <10 ms budget. The
 gate benchmark includes encoding/parsing, policy/schema checks, DLP and durable

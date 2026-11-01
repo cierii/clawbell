@@ -19,7 +19,7 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
             commands = []
-            name = "clawbell-0.1.2-linux-x86_64"
+            name = "clawbell-0.1.3-linux-x86_64"
 
             def run(arguments):
                 commands.append(arguments)
@@ -38,7 +38,7 @@ class ReleaseTests(unittest.TestCase):
                     if failure == "provenance" or (failure == "sbom" and "--predicate-type" in arguments):
                         raise subprocess.CalledProcessError(1, arguments)
                 elif arguments[1] == "--version":
-                    return b"clawbell 0.1.2\n" if failure != "identity" else b"clawbell 0.1.0\n"
+                    return b"clawbell 0.1.3\n" if failure != "identity" else b"clawbell 0.1.0\n"
                 return b""
 
             with patch.object(RELEASE.platform, "system", return_value="Linux"), \
@@ -47,13 +47,13 @@ class ReleaseTests(unittest.TestCase):
                  patch.object(RELEASE, "run", side_effect=run):
                 if failure or member_type != tarfile.REGTYPE:
                     with self.assertRaises((RELEASE.INSTALLER.Refused, subprocess.CalledProcessError)):
-                        RELEASE.install("0.1.2")
+                        RELEASE.install("0.1.3")
                     self.assertFalse((home / ".local").exists())
                     if failure != "identity":
                         self.assertFalse(any(c[0] != "gh" for c in commands))
                 else:
-                    RELEASE.install("0.1.2")
-                    binary = home / ".local/share/clawbell/releases/0.1.2/clawbell"
+                    RELEASE.install("0.1.3")
+                    binary = home / ".local/share/clawbell/releases/0.1.3/clawbell"
                     self.assertEqual(binary.read_bytes(), b"binary")
                     self.assertEqual(binary.stat().st_mode & 0o777, 0o700)
                     self.assertEqual(sum(c[1:3] == ["attestation", "verify"] for c in commands), 2)
