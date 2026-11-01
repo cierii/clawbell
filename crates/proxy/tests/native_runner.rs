@@ -24,7 +24,7 @@ impl Gate for FixtureGate {
 }
 #[tokio::test]
 #[ignore = "release measurement with real delegated cgroup and namespaces"]
-async fn native_proxy_packets_under_five_ms() -> Result {
+async fn native_proxy_packets_under_ten_ms() -> Result {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures")
         .canonicalize()?;
@@ -80,6 +80,6 @@ async fn native_proxy_packets_under_five_ms() -> Result {
         samples.len(),
         samples[1980]
     );
-    assert!(*max < Duration::from_millis(5));
+    assert!(*max < Duration::from_millis(10));
     Ok(())
 }

@@ -16,7 +16,7 @@ if (report["schema_version"] != 1
         or report["source_base_commit"] != subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()):
     raise SystemExit("evaluation_identity_mismatch")
 for name in ("gate_packet", "native_cli_rtt"):
-    if report["metrics"][name]["unit"] != "ns" or report["metrics"][name]["max"] >= 5_000_000:
+    if report["metrics"][name]["unit"] != "ns" or report["metrics"][name]["max"] >= 10_000_000:
         raise SystemExit("evaluation_packet_budget_failed")
 required_counts = {"gate_packet": 4000, "native_cli_rtt": 2000, "process_cold_start": 20,
                    "durable_audit_intent": 2000, "durable_audit_response": 2000}

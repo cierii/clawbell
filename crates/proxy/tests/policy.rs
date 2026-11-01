@@ -266,7 +266,7 @@ async fn private_storage_and_sqlite_failures_are_closed() -> Result {
 }
 #[tokio::test]
 #[ignore = "explicit release performance experiment"]
-async fn policy_packet_under_five_ms() -> Result {
+async fn policy_packet_under_ten_ms() -> Result {
     let directory = Directory::new()?;
     let store = approved_store(&directory.0).await?;
     let mut gate = PolicyGate::new(
@@ -292,7 +292,7 @@ async fn policy_packet_under_five_ms() -> Result {
         "policy + pinned schema gate, 2000 packets: p99={:?}, max={:?}",
         samples[1979], samples[1999]
     );
-    assert!(samples[1999] < std::time::Duration::from_millis(5));
+    assert!(samples[1999] < std::time::Duration::from_millis(10));
     Ok(())
 }
 

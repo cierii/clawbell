@@ -53,7 +53,7 @@ fn fail_closed() -> Result {
 }
 #[test]
 #[ignore = "explicit release latency experiment"]
-fn dlp_packet_under_five_ms() -> Result {
+fn dlp_packet_under_ten_ms() -> Result {
     let mut vault = Vault::new(1024 * 1024)?;
     let packet = format!(
         "API_KEY=synthetic-benchmark-value\n{}",
@@ -81,7 +81,7 @@ fn dlp_packet_under_five_ms() -> Result {
         times[1979],
         times[1999]
     );
-    assert!(times[1999] < std::time::Duration::from_millis(5));
+    assert!(times[1999] < std::time::Duration::from_millis(10));
     Ok(())
 }
 

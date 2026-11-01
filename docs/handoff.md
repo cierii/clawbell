@@ -1,3 +1,25 @@
+# Handoff — 2026-11-01: owner-approved 10 ms release-test budget
+
+The owner explicitly replaced the 5 ms test limit with 10 ms. Current latency
+gates and report validation require every measured packet/RTT to be strictly
+below 10 ms; exactly 10 ms fails. Renamed all seven Rust latency tests and updated
+their CI/evaluation/script filters together. The real CLI RTT assertion also uses
+10 ms. Regression checks accept 5 ms and 9,999,999 ns, and reject 10,000,000 ns and
+10,000,001 ns for both publication packet metrics. README and ADR 0018 document
+the new criterion; historical measurements and their original failures remain.
+
+Verified: complete check-release.sh passed (locked fetch, fmt, Clippy/-D warnings,
+workspace tests, release build, CLI smoke, HTTP tests, all seven explicit latency
+tests, native attacks/cleanup, skills, broker, transactions and doctor/demo).
+Separate persistent-btrfs gate passed: 4000 packets, p99 1.701355 ms, maximum
+4.332691 ms. Default-temporary native CLI RTT maximum was 1.019 ms. These are
+measured results, not universal scheduler/storage guarantees. Python/Bash syntax,
+documentation links and git diff whitespace passed. No production policy, DLP,
+isolation or audit durability behavior changed. Prior user document edits remain
+excluded from this task's commit. Remote CI must verify the pushed revision.
+
+---
+
 # Handoff — 2026-11-01: Actions log access and owner-manager installer execution
 
 GitHub MCP now reads cierii/clawbell successfully. Use github_fetch with the

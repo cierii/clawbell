@@ -21,11 +21,17 @@ may reside on a different filesystem, including tmpfs. Those values must not be
 interpreted as persistent-disk audit certification. New timing evidence must
 identify the actual audit-fixture filesystem and retain every measured outlier.
 
+On 2026-11-01 the owner changed the release-test budget to **<10 ms** for every
+measured warmed packet/RTT. The historical results below retain their original
+5 ms criterion. Current tests and report validation use the new threshold; FULL
+durable audit and all measured outliers remain included. See
+[the budget update in ADR 0018](adr/0018-durable-wal-audit.md#owner-authorized-test-budget-update-2026-11-01).
+
 When `scripts/evaluate.py` fails, it reports the fixed measurement index and
 exit/timeout/spawn status. Recognized packet metrics may also report a bounded
 integer `max_ns`; raw child output, arguments and unknown fields stay in the local
 ignored log. A failed measurement never produces a publication report. These
-failure diagnostics do not retry a test, discard outliers or relax the 5 ms gate.
+failure diagnostics do not retry a test, discard outliers or relax the current 10 ms gate.
 
 ## Permitted workflow completion and DLP false alarms
 
@@ -110,7 +116,7 @@ python3 scripts/check-evaluation.py target/evaluation/report.json target/release
 
 `evaluate.py` builds with `--locked`, runs the gate and corpus/audit experiments,
 then executes `scripts/test-native-linux.sh` in a fresh delegated user scope.
-Missing facilities or a failed command/5 ms assertion abort publication. Existing
+Missing facilities or a failed command/10 ms assertion abort publication. Existing
 output files refuse replacement. Raw logs remain in ignored `target/evaluation`;
 published JSON contains fixed metric fields, source/binary identities and platform
 metadata, without owner paths, client JSON, tokens or raw audit/tool payloads.

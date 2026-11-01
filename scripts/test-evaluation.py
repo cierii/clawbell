@@ -95,9 +95,12 @@ sys.exit(17)
                     candidate["metrics"][metric]["samples"] = 0
                     self.assertNotEqual(check(candidate), 0)
             for metric in ("gate_packet", "native_cli_rtt"):
-                candidate = copy.deepcopy(report)
-                candidate["metrics"][metric]["max"] = 5_000_000
-                self.assertNotEqual(check(candidate), 0)
+                for maximum, accepted in [(5_000_000, True), (9_999_999, True),
+                                          (10_000_000, False), (10_000_001, False)]:
+                    with self.subTest(metric=metric, maximum=maximum):
+                        candidate = copy.deepcopy(report)
+                        candidate["metrics"][metric]["max"] = maximum
+                        self.assertEqual(check(candidate) == 0, accepted)
             candidate = copy.deepcopy(report)
             candidate["metrics"]["native_allowed_reads"]["completed"] -= 1
             self.assertNotEqual(check(candidate), 0)

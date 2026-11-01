@@ -50,9 +50,9 @@ jobs:
       - name: Format, lint, test, build and CLI smoke checks
         run: bash scripts/check-local.sh
       - name: Production gate packet budget (includes durable audit)
-        run: cargo test --locked --release -p clawbell complete_mvp_gate_packets_under_five_ms -- --ignored --nocapture
+        run: cargo test --locked --release -p clawbell complete_mvp_gate_packets_under_ten_ms -- --ignored --nocapture
       - name: Broker packet budget (policy, DLP, durable audit and loopback)
-        run: cargo test --locked --release -p clawbell-proxy broker_packets_under_five_ms -- --ignored --nocapture
+        run: cargo test --locked --release -p clawbell-proxy broker_packets_under_ten_ms -- --ignored --nocapture
   native:
     if: github.event_name != 'schedule'
     strategy:

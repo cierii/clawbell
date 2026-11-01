@@ -59,6 +59,17 @@ separately from other I/O-heavy tests. Keep every measured packet and all checkp
 costs in the strict maximum. Shared-host scheduling and storage pauses can still
 exceed a release budget; a failed measurement must remain a failed release.
 
+## Owner-authorized test budget update (2026-11-01)
+
+The owner explicitly changed the maximum latency criterion from <5 ms to <10 ms.
+Apply the strict <10 ms threshold to every measured warmed proxy packet and native
+round trip, including policy, DLP, monitor, broker and remote-resource tests and
+release-report validation. Exactly 10 ms still fails, matching the existing strict
+comparison. Update test names and CI filters together so every gate still runs.
+Earlier measurements and their original 5 ms pass/fail outcomes remain historical.
+This changes the acceptance budget only: FULL commit acknowledgement, checkpoints,
+sample counts, outlier inclusion and isolation requirements remain unchanged.
+
 MCP Context7 supplied official [SQLite WAL documentation](https://www.sqlite.org/wal.html),
 [synchronization and journal limits](https://www.sqlite.org/pragma.html) and
 [checkpoint semantics](https://www.sqlite.org/c3ref/wal_checkpoint_v2.html).

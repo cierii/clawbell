@@ -158,7 +158,7 @@ background replay or rollback. Keep external writers quiescent from snapshot to
 commit. Client disconnect cancels waiting consent; an already-running commit is
 joined and audited even when its response cannot reach the client. Startup,
 snapshots, inspection, owner review and publication are measured separately from
-the warmed <5 ms proxy packet budget. See [ADR 0014](docs/adr/0014-per-operation-mcp-publication.md).
+the warmed <10 ms proxy packet budget. See [ADR 0014](docs/adr/0014-per-operation-mcp-publication.md).
 
 ### Transaction library boundary
 
@@ -640,7 +640,7 @@ checks refused forwarding and unchanged synthetic host/memory fixtures. Storage,
 backup tampering, interruption, Unicode, nested Base64, invalid schemas, malformed
 protocol, socket IPC, output bounds and lifecycle failures have separate coverage.
 
-Release experiments assert **every measured warmed packet/RTT below 5 ms**. The new
+Release experiments assert **every measured warmed packet/RTT below 10 ms**. The new
 gate benchmark includes encoding/parsing, policy/schema checks, DLP and durable
 SQLite audit (4,000 packets); a real CLI/native benchmark measures 2,000 complete
 read-tool round trips. Startup, catalog pinning/schema compilation, large messages,
@@ -774,7 +774,7 @@ timed FULL durable-audit measurements, run `python3 scripts/evaluate.py` on an i
 namespace-capable Linux user session with persistent user-manager access. The
 exclusive output is `target/evaluation/report.json`; raw local test logs remain
 ignored. See the [evaluation report](docs/evaluation.md) for the measured corpus,
-results and limits. A failed measurement or 5 ms packet gate prevents a new report.
+results and limits. A failed measurement or 10 ms packet gate prevents a new report.
 
 ## Safe error diagnostics
 
