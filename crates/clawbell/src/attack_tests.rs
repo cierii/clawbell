@@ -276,7 +276,7 @@ async fn complete_mvp_gate_packet_latency_budget() -> Result<()> {
         json!({"gate_packet": latency_summary(&durations)?})
     );
     assert!(
-        durations[(durations.len() * 99).div_ceil(100) - 1] < std::time::Duration::from_millis(10)
+        durations[(durations.len() * 99).div_ceil(100) - 1] < std::time::Duration::from_millis(15)
     );
     assert!(maximum < std::time::Duration::from_secs(1));
     Ok(())
@@ -847,7 +847,7 @@ async fn remote_resource_gate_packet_latency_budget() -> Result<()> {
         samples[(samples.len() * 99).div_ceil(100) - 1],
         max
     );
-    assert!(samples[(samples.len() * 99).div_ceil(100) - 1] < std::time::Duration::from_millis(10));
+    assert!(samples[(samples.len() * 99).div_ceil(100) - 1] < std::time::Duration::from_millis(15));
     assert!(max < std::time::Duration::from_secs(1));
     proxy.finish().await?;
     Ok(())

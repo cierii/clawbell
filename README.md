@@ -640,7 +640,7 @@ checks refused forwarding and unchanged synthetic host/memory fixtures. Storage,
 backup tampering, interruption, Unicode, nested Base64, invalid schemas, malformed
 protocol, socket IPC, output bounds and lifecycle failures have separate coverage.
 
-Release experiments with durable audit require **nearest-rank p99 <10 ms and
+Release experiments with durable audit require **nearest-rank p99 <15 ms and
 maximum <1 s** across all measured warmed packets/RTTs. Equality fails either
 limit. Tests without durable I/O retain their maximum <10 ms budget. The
 gate benchmark includes encoding/parsing, policy/schema checks, DLP and durable

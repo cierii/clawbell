@@ -17,7 +17,7 @@ if (report["schema_version"] != 1
     raise SystemExit("evaluation_identity_mismatch")
 for name in ("gate_packet", "native_cli_rtt"):
     metric = report["metrics"][name]
-    if (metric["unit"] != "ns" or metric["p99"] >= 10_000_000
+    if (metric["unit"] != "ns" or metric["p99"] >= 15_000_000
             or metric["max"] >= 1_000_000_000):
         raise SystemExit("evaluation_packet_budget_failed")
 required_counts = {"gate_packet": 4000, "native_cli_rtt": 2000, "process_cold_start": 20,

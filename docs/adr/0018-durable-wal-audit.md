@@ -99,3 +99,19 @@ is introduced. Historical reports keep their original criteria and outcomes.
 Context7 reconfirmed SQLite's [FULL synchronization](https://www.sqlite.org/pragma.html)
 and [automatic checkpoints](https://www.sqlite.org/wal.html): FULL WAL commits
 synchronize the WAL, and automatic checkpoints may add work to a committing call.
+
+## Owner-authorized 15 ms percentile update (2026-11-01)
+
+Actions run 41324724490 passed checks, dependencies, both installers and native
+x86-64. Native AArch64 passed its containment tests but failed the full CLI RTT
+budget: nearest-rank p99 12,136,041 ns, maximum 327,243,960 ns. This remains a
+failed result under the preceding p99 <10 ms contract; do not relabel it a pass.
+
+The owner explicitly approved **p99 <15 ms with maximum <1 s** for measurements
+including durable audit. Apply the new percentile limit consistently to the
+production gate, remote resource gate, broker gate, full CLI RTT and publication
+report verifier. Exactly 15 ms for p99 or exactly 1 s for maximum still fails.
+Tests without durable I/O keep their existing maximum budgets. FULL durability,
+checkpointing, isolation, sample counts, warmup and inclusion of every measured
+outlier remain unchanged. This updates acceptance criteria only, not runtime
+performance or the interpretation of historical reports.
