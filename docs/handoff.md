@@ -1,3 +1,60 @@
+# Handoff — 2026-11-01: Actions log access and owner-manager installer execution
+
+GitHub MCP now reads cierii/clawbell successfully. Use github_fetch with the
+Actions runs collection for push-triggered runs; fetch_commit_workflow_runs only
+returns pull-request runs. SSH origin/main is available. No credentials were
+requested, copied or added to the checkout.
+
+Delivered and pushed:
+- ec92ac7: report only allowlisted, source-defined doctor error codes from a failed
+  containment_probe; never forward captured stderr, hints, paths or unknown codes.
+- e925a8b: start installer doctor/init through transient owner user services using
+  systemd-run --user --wait --pipe --collect --service-type=exec. A CI system-service
+  caller cannot migrate its child into the owner's delegation merely by owning
+  the target: cgroups v2 also checks write permission at the common ancestor.
+  Keep all native checks; do not widen cgroup ancestor permissions or change
+  AppArmor/no_new_privs. Retain the installation doctor report in private state.
+  The clean-host gate uses the same owner-manager context after service restart.
+
+Evidence:
+- Run 41252447148 (52d98b2): checks failed with 4000 packets, p99 0.839 ms and
+  max 11.674482 ms. Both installers failed at containment_probe. Run 41253176740
+  (ec92ac7) classified the ARM installer failure as host_isolated_spawn_failed.
+- Local check-local.sh passed: 10 installer tests, evaluation test, locked fetch,
+  fmt, Clippy/-D warnings, workspace tests, release build and CLI help/policy check.
+  After the owner-manager change, all 11 installer tests and Bash syntax passed.
+- A real transient owner user service executed successfully. The complete local
+  test-native-linux.sh passed in delegated user scope: six containment tests,
+  transport RTT max 1.096 ms, full CLI/native/DLP/audit RTT max 0.900 ms, skills,
+  broker, transaction refusals/recovery and doctor/demo. Default temporary fixtures
+  do not certify persistent-disk latency.
+- Separate persistent btrfs gate FAILED: 4000 packets, p99 2.380641 ms and max
+  5.929304 ms. The strict 5 ms maximum and FULL durable audit remain unchanged.
+  Do not claim the performance requirement is met or publish a release.
+- Gitleaks 8.30.1 scanned fetched history and both exact staged commits without
+  findings. No guarantee of exhaustive detection is implied. AGENTS.md unchanged.
+
+Actions run 41253637646 tests e925a8b. Both clean-host Ubuntu installers PASSED,
+including provisioning, bind/restore, persistent delegation restart and self-test.
+The dependency audit also passed. Checks failed only at the strict packet gate
+(max 5.984693 ms); native ARM passed ordinary checks/HTTP tests then failed the
+same gate (max 5.514996 ms), before its explicit native isolation tests ran.
+Native x86-64 passed all release gates, native attacks and cleanup tests (full CLI
+RTT max 4.608 ms), then failed evaluate.py's second execution of the native suite.
+That command retained its output only on the discarded runner, so the specific
+failure is not yet known. Evaluation failure diagnostics now emit only fixed
+stage/status and bounded integer maxima for recognized packet metrics; malformed
+or unknown fields remain private. Three evaluation regressions and all eleven
+installer tests pass. No failed command produces a publication report or retry.
+The shared-host persistent-disk latency issue remains open; prior evidence
+includes synchronization syscalls exceeding 5 ms. The next Actions run must verify
+these diagnostics and identify the hidden native evaluation failure.
+
+The owner's pre-existing handoff access note and two untracked documents are
+preserved. Do not include them in a fix commit without reviewing their scope.
+
+---
+
 # Handoff — 2026-11-01: native CI repairs and installer diagnostics
 
 The owner supplied five failing Actions jobs and authorized fixes, secret review,

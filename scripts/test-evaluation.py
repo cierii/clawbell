@@ -1,6 +1,8 @@
 """Reject incomplete, foreign and over-budget publication evidence."""
 import copy
+import contextlib
 import hashlib
+import io
 import json
 from pathlib import Path
 import platform
@@ -8,10 +10,49 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from evaluate import ROOT, source_fingerprint
+from unittest.mock import patch
+from evaluate import ROOT, EvaluationFailure, execute, failure_metrics, source_fingerprint
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_failed_command_preserves_only_numeric_packet_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "measurement.log"
+            output = io.StringIO()
+            script = '''import sys
+print('synthetic-private-output')
+print('CLAWBELL_EVALUATION={"native_cli_rtt":{"unit":"ns","max":6000000,"secret":"synthetic-private-field"}}')
+sys.exit(17)
+'''
+            with contextlib.redirect_stdout(output), self.assertRaises(EvaluationFailure) as caught:
+                execute([sys.executable, "-c", script], log)
+            self.assertEqual(str(caught.exception), "evaluation_command_failed; status=exit_17")
+            self.assertEqual(output.getvalue(),
+                             "evaluation_failed_packet_metric; metric=native_cli_rtt; max_ns=6000000\n")
+            self.assertIn("synthetic-private-output", log.read_text())
+            self.assertFalse((Path(temporary) / "report.json").exists())
+
+    def test_failed_metrics_refuse_unknown_malformed_and_non_integer_fields(self):
+        fragments = [None, [], {"unknown": {"unit": "ns", "max": 6000000}}]
+        fragments.extend({"gate_packet": {"unit": unit, "max": value}}
+                         for unit, value in [("secret", 1), ("ns", "synthetic-private-value"),
+                                             ("ns", True), ("ns", -1), ("ns", 2**63), ("ns", 1.5)])
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "measurement.log"
+            log.write_text("CLAWBELL_EVALUATION=malformed\n" + "\n".join(
+                "CLAWBELL_EVALUATION=" + json.dumps(fragment) for fragment in fragments))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                failure_metrics(log)
+                failure_metrics(log.with_name("missing.log"))
+            self.assertEqual(output.getvalue(), "")
+            for error, status in [(subprocess.TimeoutExpired(["synthetic-private-argv"], 1), "timeout"),
+                                  (OSError("synthetic-private-path"), "spawn_failed")]:
+                with patch("evaluate.subprocess.run", side_effect=error), \
+                        self.assertRaises(EvaluationFailure) as caught:
+                    execute(["synthetic-private-argv"], log)
+                self.assertEqual(str(caught.exception), "evaluation_command_failed; status=" + status)
+
     def test_publication_requires_complete_bound_measurements(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

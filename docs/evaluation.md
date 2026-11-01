@@ -21,6 +21,12 @@ may reside on a different filesystem, including tmpfs. Those values must not be
 interpreted as persistent-disk audit certification. New timing evidence must
 identify the actual audit-fixture filesystem and retain every measured outlier.
 
+When `scripts/evaluate.py` fails, it reports the fixed measurement index and
+exit/timeout/spawn status. Recognized packet metrics may also report a bounded
+integer `max_ns`; raw child output, arguments and unknown fields stay in the local
+ignored log. A failed measurement never produces a publication report. These
+failure diagnostics do not retry a test, discard outliers or relax the 5 ms gate.
+
 ## Permitted workflow completion and DLP false alarms
 
 The real MCP fixture completed **2,200/2,200 allowed read calls (100%)**, with the

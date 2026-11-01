@@ -19,6 +19,41 @@ ROOT = Path(__file__).resolve().parent.parent
 PREFIX = "CLAWBELL_EVALUATION="
 
 
+class EvaluationFailure(Exception):
+    """Fixed failure status; never includes argv or captured command output."""
+
+
+def failure_metrics(log):
+    """Emit only bounded integer maxima from recognized synthetic packet metrics.
+
+    A failed native gate still writes its measurements before exiting. Preserve
+    that evidence without publishing a success report or dumping child output.
+    Unknown fields, malformed fragments and non-integer values remain private.
+    """
+    try:
+        with log.open("rb") as source:
+            source.seek(max(0, log.stat().st_size - 131072))
+            lines = source.read(131072).decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        if not line.startswith(PREFIX):
+            continue
+        try:
+            fragment = json.loads(line[len(PREFIX):])
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(fragment, dict):
+            continue
+        for name in ("gate_packet", "native_cli_rtt"):
+            metric = fragment.get(name)
+            if not isinstance(metric, dict) or metric.get("unit") != "ns":
+                continue
+            maximum = metric.get("max")
+            if type(maximum) is int and 0 < maximum < 2**63:
+                print(f"evaluation_failed_packet_metric; metric={name}; max_ns={maximum}", flush=True)
+
+
 def source_fingerprint():
     """Hash relevant source bytes, including this session's unstaged source edits."""
     names = subprocess.check_output(
@@ -33,9 +68,19 @@ def source_fingerprint():
 
 
 def execute(arguments, log, timeout=1800):
-    with log.open("wb") as output:
-        subprocess.run(arguments, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT,
-                       check=True, timeout=timeout)
+    try:
+        with log.open("wb") as output:
+            subprocess.run(arguments, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT,
+                           check=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as error:
+        if isinstance(error, subprocess.CalledProcessError):
+            status = f"exit_{error.returncode}"
+        elif isinstance(error, subprocess.TimeoutExpired):
+            status = "timeout"
+        else:
+            status = "spawn_failed"
+        failure_metrics(log)
+        raise EvaluationFailure(f"evaluation_command_failed; status={status}") from None
     return log.read_text()
 
 
@@ -61,6 +106,7 @@ def main():
     ]
     metrics = {}
     for index, command in enumerate(commands):
+        print(f"evaluation_measurement={index}", flush=True)
         output = execute(command, logs / f"measurement-{index}.log")
         for line in output.splitlines():
             if line.startswith(PREFIX):
@@ -104,4 +150,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except EvaluationFailure as error:
+        raise SystemExit(str(error)) from None
