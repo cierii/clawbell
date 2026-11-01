@@ -69,6 +69,25 @@ async fn raw_gate(dir: &Directory) -> Result<impl Gate + use<>> {
         "synthetic-owner-upstream".into(),
     )
 }
+/// Reconnect only after the old writer has closed SQLite and released its lease.
+/// Dropping a gate closes a channel; it does not join the dedicated writer thread.
+/// Racing WAL sidecar cleanup can correctly fail private-file validation.
+async fn wait_for_audit_shutdown(dir: &Directory) -> Result<()> {
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.0.join("operations.lock"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match lease.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
 fn tools(description: &str) -> Value {
     json!([{"name":"read_file","description":description,"inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}},"additionalProperties":false}}, {"name":"write_file","inputSchema":{"type":"object","required":["path","text"],"properties":{"path":{"type":"string"},"text":{"type":"string"}},"additionalProperties":false}}])
 }
@@ -488,6 +507,8 @@ async fn audit_a06_secret_catalog_refuses_before_first_pin_and_clean_reconnect_s
                 .is_err()
         );
         proxy.finish().await?;
+        drop(proxy);
+        wait_for_audit_shutdown(&dir).await?;
         let connection = rusqlite::Connection::open(dir.0.join("tool-baselines.sqlite3"))?;
         for table in ["tool_baselines_v1", "pin_reviews_v1"] {
             assert_eq!(
@@ -502,6 +523,8 @@ async fn audit_a06_secret_catalog_refuses_before_first_pin_and_clean_reconnect_s
         let mut proxy = raw_gate(&dir).await?;
         catalog(&mut proxy, "Reviewed clean catalog").await?;
         proxy.finish().await?;
+        drop(proxy);
+        wait_for_audit_shutdown(&dir).await?;
     }
     for name in ["operations.sqlite3", "tool-baselines.sqlite3"] {
         assert!(
