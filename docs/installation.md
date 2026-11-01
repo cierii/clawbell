@@ -1,7 +1,7 @@
 # Installation and recovery
 
 For a quick offline CLI trial, use the authenticated binary installer described in
-[README](../README.md#try-a-release-without-compiling). It installs only an exact
+[CLI guide](cli-guide.md#try-a-release-without-compiling). It installs only an exact
 release binary, under a 55-second deadline, after checksum and two attestation
 checks. No archive paths are extracted. Failed verification never executes the
 binary or installs it. This does not enable firewall protection for a client.
@@ -29,7 +29,7 @@ containing credentials. Without `--workspace`, installation prepares an empty
 private workspace; existing external server scripts will need explicit relocation
 and client configuration review. Literal absolute paths inside the selected
 workspace are translated by the existing binder. Client format limitations in
-[README](../README.md#install-and-bind-a-client) still apply.
+[CLI guide](cli-guide.md#install-and-bind-a-client) still apply.
 
 ## Changes made to the host
 
