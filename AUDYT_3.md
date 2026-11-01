@@ -7,9 +7,10 @@ owner clarified that bug fixes, installer and CI changes are permitted.
 
 ## Verdict
 
-**Suitable for publication as an experimental Linux security tool, with explicit
-limitations. Not complete against the full AGENTS.md product contract, and not a
-universal production security guarantee.** The Rust implementation contains real
+**Suitable for source publication as an experimental Linux security tool, with
+explicit limitations. Binary release v0.1.2 is blocked by its CI latency gate.
+Not complete against the full AGENTS.md product contract, and not a universal
+production security guarantee.** The Rust implementation contains real
 policy, DLP, isolation and durable-audit enforcement; it is substantially more than
 a scaffold. No newly reproduced Rust security defect was established in this
 session. This statement is limited to the inspected boundaries and executed tests;
@@ -229,3 +230,47 @@ staged contents and fetched history are scanned before commit. Local packaging
 does not produce GitHub attestations; remote tag publication and its final
 download/verification trial remain separate checks, never inferred from these
 local results.
+
+## Persistent-filesystem evaluation of the tagged candidate
+
+A separate full evaluation of `73ebbf5`/v0.1.2 passed on btrfs, including the actual
+audit-fixture filesystem. The [machine-readable report](docs/evaluation/linux-x86_64-2026-11-01.json)
+binds commit, source fingerprint and binary hash. The report verifier passed.
+All 2,200/2,200 allowed native reads completed. Full CLI RTT: p99 3.189 ms,
+maximum 5.108 ms. Production gate: p99 1.769 ms, maximum 11.924 ms; every
+measured outlier remains included. Both satisfy the current p99 <15 ms/maximum
+<1 s durable-audit contract. The 20-workflow stress corpus again produced 9 false
+alarms (45% for this corpus only). These results do not certify another host.
+
+Two earlier additional evaluation attempts did not complete and produced no success
+report: a deeply nested TMPDIR exceeded the existing 107-byte monitor socket-path
+limit, and a short TMPDIR under /var collided with the deliberate CLI prohibition
+on runtime state under /var. Their gate/corpus measurements passed, but the native
+binding assertion refused. Correcting only the fixture location to a short private
+owner directory on btrfs allowed the full evaluation to pass. No threshold, outlier,
+audit durability, sandbox or production path rule changed. Failed attempts are not
+counted as successful evaluations.
+
+## C-07 — Release blocker: tagged CI broker latency failure
+
+The exact v0.1.2/`73ebbf5` [tag run](https://github.com/cierii/clawbell/actions/runs/41332957282)
+failed the broker packet gate in the checks job. Ordinary formatting, lint, tests,
+build, CLI checks and the production packet gate passed first. Broker measurement:
+**p99 30.213244 ms, maximum 198.288973 ms**. The assertion requires p99 <15 ms
+and maximum <1 s; the percentile failed. Both clean-host installers and the
+RustSec job passed; native AArch64 also completed successfully. This failure is
+not relabeled as success because local checks or the previous revision passed.
+
+No replay, outlier removal, automatic retry, threshold relaxation, tmpfs
+substitution, disabled audit or unsigned/manual release was introduced. The
+measurement alone does not identify storage versus scheduler/network/runtime
+contention, or establish a functional sandbox escape. Root-cause diagnosis needs
+phase-specific measurements on the failing host before a justified production
+optimization. A speculative code change would not establish a repair.
+
+The failed prerequisite prevents packaging/publication. Thus this session does
+not establish a successful downloaded-release trial: the installer is implemented
+and locally failure-tested, and its real published-asset test is configured, but
+that test cannot execute until the release gates pass. The source tag exists;
+there is no successful v0.1.2 binary release to advertise. The requested fully
+verified binary publication remains incomplete.

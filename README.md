@@ -8,6 +8,11 @@ claim to recognize every malicious instruction or arbitrary encoded secret.
 
 ## Try a release without compiling
 
+Publication status: the v0.1.2 tag currently fails its CI broker latency gate.
+Authenticated release assets are unavailable until every gate passes. See
+[AUDYT_3.md](AUDYT_3.md#c-07--release-blocker-tagged-ci-broker-latency-failure).
+The source installation below remains available.
+
 From a reviewed checkout, with Python 3.11+ and GitHub CLI installed/authenticated:
 
 ```bash

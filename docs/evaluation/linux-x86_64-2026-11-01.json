@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "measured_at_utc": "2026-11-01T17:48:17.058349+00:00",
+  "source_fingerprint_sha256": "296af02d315e2de1f9ab1a71119b11d2ab5c52021fa94d7469122a72bae33ef6",
+  "source_base_commit": "73ebbf5c3f234fb12a212fd3a9f6f024103aee43",
+  "binary_sha256": "4b69d9bf67ae11181854091754cb22234ae576fe908e1548975f676bb2572c60",
+  "environment": {
+    "os": "Linux",
+    "kernel": "7.2.8-200.fc44.x86_64",
+    "architecture": "x86_64",
+    "rust": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "filesystem": "btrfs",
+    "audit_filesystem": "btrfs"
+  },
+  "metrics": {
+    "gate_packet": {
+      "max": 11924068,
+      "p50": 847436,
+      "p95": 1019692,
+      "p99": 1769443,
+      "quantile": "nearest_rank",
+      "samples": 4000,
+      "unit": "ns"
+    },
+    "benign_corpus": {
+      "completed_unchanged": 11,
+      "dlp_false_alarms": 9,
+      "dlp_false_redactions": 2,
+      "dlp_false_refusals": 7,
+      "scope": "synthetic read-tool workflows; refusal or changed public text is an alarm",
+      "workflows": 20,
+      "completion_rate": 0.55,
+      "false_alarm_rate": 0.45
+    },
+    "durable_audit_intent": {
+      "max": 3440270,
+      "p50": 738459,
+      "p95": 863216,
+      "p99": 1756098,
+      "quantile": "nearest_rank",
+      "samples": 2000,
+      "unit": "ns"
+    },
+    "durable_audit_response": {
+      "max": 3406836,
+      "p50": 739341,
+      "p95": 858738,
+      "p99": 1658874,
+      "quantile": "nearest_rank",
+      "samples": 2000,
+      "unit": "ns"
+    },
+    "process_cold_start": {
+      "samples": 20,
+      "unit": "ns",
+      "quantile": "nearest_rank",
+      "p50": 61848981,
+      "p95": 67564393,
+      "p99": 70589196,
+      "max": 70589196
+    },
+    "native_cli_rtt": {
+      "samples": 2000,
+      "unit": "ns",
+      "quantile": "nearest_rank",
+      "p50": 1789411,
+      "p95": 2032252,
+      "p99": 3188603,
+      "max": 5107850
+    },
+    "native_allowed_reads": {
+      "attempted": 2200,
+      "completed": 2200
+    }
+  },
+  "limitations": [
+    "Synthetic deterministic read-tool corpus, not representative field completion or DLP incidence.",
+    "Process-cold startup with warm OS caches and already accepted pins; excludes build and owner approval.",
+    "Audit cost is separately timed production queue/transaction/FULL fsync acknowledgement per event, not a subtraction.",
+    "Warm bounded packets; no hard real-time claim under arbitrary host contention or maximum-size inputs.",
+    "Native macOS, Windows and AArch64 results require execution on those hosts and are not inferred here."
+  ]
+}
