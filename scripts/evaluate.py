@@ -99,7 +99,7 @@ def main():
     execute(["cargo", "build", "--release", "--locked", "-p", "clawbell"], logs / "build.log")
     commands = [
         ["cargo", "test", "--locked", "--release", "-p", "clawbell",
-         "complete_mvp_gate_packets_under_ten_ms", "--", "--ignored", "--nocapture"],
+         "complete_mvp_gate_packet_latency_budget", "--", "--ignored", "--nocapture"],
         ["cargo", "test", "--locked", "--release", "-p", "clawbell",
          "release_evaluation_corpus_and_durable_audit", "--", "--ignored", "--nocapture"],
         ["systemd-run", "--user", "--scope", "-p", "Delegate=yes", "bash", "scripts/test-native-linux.sh"],

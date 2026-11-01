@@ -96,10 +96,19 @@ sys.exit(17)
                     self.assertNotEqual(check(candidate), 0)
             for metric in ("gate_packet", "native_cli_rtt"):
                 for maximum, accepted in [(5_000_000, True), (9_999_999, True),
-                                          (10_000_000, False), (10_000_001, False)]:
+                                          (10_000_000, True), (405_653_223, True),
+                                          (999_999_999, True), (1_000_000_000, False),
+                                          (1_000_000_001, False)]:
                     with self.subTest(metric=metric, maximum=maximum):
                         candidate = copy.deepcopy(report)
                         candidate["metrics"][metric]["max"] = maximum
+                        self.assertEqual(check(candidate) == 0, accepted)
+            for metric in ("gate_packet", "native_cli_rtt"):
+                for percentile, accepted in [(9_999_999, True), (10_000_000, False),
+                                             (10_000_001, False)]:
+                    with self.subTest(metric=metric, p99=percentile):
+                        candidate = copy.deepcopy(report)
+                        candidate["metrics"][metric].update(p99=percentile, max=999_999_999)
                         self.assertEqual(check(candidate) == 0, accepted)
             candidate = copy.deepcopy(report)
             candidate["metrics"]["native_allowed_reads"]["completed"] -= 1

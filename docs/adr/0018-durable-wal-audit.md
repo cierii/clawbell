@@ -73,3 +73,29 @@ sample counts, outlier inclusion and isolation requirements remain unchanged.
 MCP Context7 supplied official [SQLite WAL documentation](https://www.sqlite.org/wal.html),
 [synchronization and journal limits](https://www.sqlite.org/pragma.html) and
 [checkpoint semantics](https://www.sqlite.org/c3ref/wal_checkpoint_v2.html).
+
+## Owner-authorized percentile budget (2026-11-01)
+
+Actions run 41256563230 failed on both hosted architectures: the x86-64 gate
+maximum was 13,985,821 ns; the AArch64 full CLI RTT maximum was 405,653,223 ns,
+with p99 1,955,159 ns. These are failed results under the preceding criterion,
+not evidence of a functional containment failure or a specific storage cause.
+
+The owner explicitly approved replacing the maximum-only criterion for tests
+including durable audit with nearest-rank **p99 <10 ms and maximum <1 s**.
+Equality at either boundary fails. Apply both assertions to the production gate,
+remote resource gate, broker gate, full CLI RTT and publication report verifier.
+Keep the same measured sample counts and warmup; retain every measured outlier,
+including checkpoint and scheduling pauses, in quantiles and the maximum. Tests
+without durable I/O retain maximum <10 ms. Rename changed test filters with their
+callers so no gate silently stops running.
+
+This is an acceptance-contract change, not a performance optimization or a
+hard real-time promise. FULL commit acknowledgement, WAL checkpoints, storage
+quotas, mandatory containment and failure-before-execution remain unchanged.
+No retry, filtered sample, volatile-storage substitution or durability fallback
+is introduced. Historical reports keep their original criteria and outcomes.
+
+Context7 reconfirmed SQLite's [FULL synchronization](https://www.sqlite.org/pragma.html)
+and [automatic checkpoints](https://www.sqlite.org/wal.html): FULL WAL commits
+synchronize the WAL, and automatic checkpoints may add work to a committing call.
