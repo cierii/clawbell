@@ -44,3 +44,14 @@ contract changes in an ADR. Avoid new dependencies without a functional or
 security justification. Report vulnerabilities using [SECURITY.md](SECURITY.md),
 not public issues. The project uses the [MIT license](LICENSE); contributions
 must be compatible with it. There is currently no browser frontend to build/test.
+
+## Code navigation and starter tasks
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the intercepted request lifecycle and
+Gate/Runner boundaries, and [security profiles](policies/README.md) for tested
+owner policy examples. Transport framing must not introduce policy or sandbox
+bypasses. The pure evaluator lives in core; proxy adapters orchestrate checks;
+sandbox enforces processes; audit owns durable storage.
+
+Look for GitHub issues labeled `good first issue` for bounded starter tasks.
+Keep unrelated refactors, dependency upgrades and release changes out of them.

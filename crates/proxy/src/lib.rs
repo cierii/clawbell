@@ -21,6 +21,7 @@ pub mod broker;
 mod content;
 pub mod dlp;
 pub mod http;
+mod mcp_schema;
 #[cfg(unix)]
 pub mod monitor;
 pub mod network;

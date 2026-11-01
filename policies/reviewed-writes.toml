@@ -1,0 +1,32 @@
+# Owner-reviewed example for a credential-free workspace. No shell or skill grants.
+version = "profile-reviewed-writes-1"
+
+[[tools]]
+name = "read_file"
+effect = "read"
+paths = ["/path"]
+
+[[tools]]
+name = "write_file"
+effect = "write"
+paths = ["/path"]
+
+[[tools]]
+name = "shell"
+effect = "opaque"
+
+# Conservative defense in depth over serialized arguments, not filesystem isolation.
+[[rules]]
+tool = "*"
+arguments_regex = '(?i)(^|[/\\])\.ssh([/\\]|$|")|(^|[/\\])\.env([./\\]|$|")'
+decision = "deny"
+
+[[rules]]
+tool = "read_file"
+path_prefix = "workspace"
+decision = "allow"
+
+[[rules]]
+tool = "write_file"
+path_prefix = "workspace/output"
+decision = "require_approval"

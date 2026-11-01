@@ -6,6 +6,11 @@ pinned tool schemas, session DLP, durable SQLite audit and native containment.
 It runs without cloud telemetry. It is a conservative security boundary, not a
 claim to recognize every malicious instruction or arbitrary encoded secret.
 
+## Understand and contribute
+
+See [architecture and request flow](ARCHITECTURE.md),
+[contributor setup](CONTRIBUTING.md) and [security profiles](policies/README.md).
+
 ## Try a release without compiling
 
 Release v0.1.4 uses the owner-approved p99 <40 ms durable-audit budget.

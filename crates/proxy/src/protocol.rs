@@ -33,6 +33,11 @@ impl Envelope {
     /// Parse one message, enforcing size, depth (serde's recursion bound),
     /// JSON-RPC shape and the official SDK's direction-specific MCP schemas.
     ///
+    /// Both stdio frames and HTTP/SSE messages enter here after bounded buffering.
+    /// Strict JSON rejects duplicate keys before the SDK sees the value; session
+    /// correlation and the security Gate are separate, mandatory later checks.
+    /// Parsing success alone never authorizes forwarding.
+    ///
     /// # Errors
     /// Rejects batches, null/fractional IDs, extra envelope fields and unknown MCP methods.
     pub fn parse(bytes: &[u8], direction: Direction, max: usize) -> Result<Self, Error> {
@@ -72,49 +77,7 @@ impl Envelope {
         {
             return Err(Error::InvalidMessage);
         }
-        // SDK schemas live only here; transport code does not depend on SDK internals.
-        match direction {
-            Direction::Client => {
-                use rmcp::model::{
-                    ClientJsonRpcMessage, ClientNotification, ClientRequest, JsonRpcMessage,
-                };
-                let typed: ClientJsonRpcMessage =
-                    serde_json::from_value(value.clone()).map_err(|_| Error::InvalidMessage)?;
-                match typed {
-                    JsonRpcMessage::Request(r)
-                        if matches!(r.request, ClientRequest::CustomRequest(_)) =>
-                    {
-                        return Err(Error::InvalidMessage);
-                    }
-                    JsonRpcMessage::Notification(n)
-                        if matches!(n.notification, ClientNotification::CustomNotification(_)) =>
-                    {
-                        return Err(Error::InvalidMessage);
-                    }
-                    _ => {}
-                }
-            }
-            Direction::Server => {
-                use rmcp::model::{
-                    JsonRpcMessage, ServerJsonRpcMessage, ServerNotification, ServerRequest,
-                };
-                let typed: ServerJsonRpcMessage =
-                    serde_json::from_value(value.clone()).map_err(|_| Error::InvalidMessage)?;
-                match typed {
-                    JsonRpcMessage::Request(r)
-                        if matches!(r.request, ServerRequest::CustomRequest(_)) =>
-                    {
-                        return Err(Error::InvalidMessage);
-                    }
-                    JsonRpcMessage::Notification(n)
-                        if matches!(n.notification, ServerNotification::CustomNotification(_)) =>
-                    {
-                        return Err(Error::InvalidMessage);
-                    }
-                    _ => {}
-                }
-            }
-        }
+        super::mcp_schema::validate(&value, direction)?;
         Ok(Self(value))
     }
     /// Read validated contents for policy/schema inspection. Do not log them.

@@ -1,4 +1,10 @@
 //! Linux isolation is applied before exec; children cannot race cgroup enrollment.
+//!
+//! This adapter enforces execution, not tool authorization. The composition root
+//! must authorize and durably audit launch before constructing the runner.
+//! Read-only mounts still disclose their contents: the pinned workspace must be
+//! credential-free. Argument path rules cannot hide files inside that mount.
+//! See `docs/adr/0004-native-process-containment.md` for the enforcement contract.
 use crate::{LaunchError, Runner, native::NativeConfig, seccomp, sys};
 use std::{
     fs::{self, File, OpenOptions},
