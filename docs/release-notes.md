@@ -1,3 +1,14 @@
+# 0.1.2 — Publication audit and verified binary trial
+
+- Added an exact-version Linux binary installer with checksum, build provenance
+  and SBOM verification and a 55-second deadline. It performs an offline CLI trial;
+  host provisioning and client binding remain separate and take longer.
+- Added contributor guidance, strengthened ignore rules and replaced the obsolete
+  second audit with AUDYT_3.md. Existing MIT/security policies remain in force.
+- Production Rust security behavior and architecture remain unchanged.
+- Full Linux release checks remain mandatory on x86-64 and AArch64. Missing
+  prerequisites or failed attestations refuse publication/installation.
+
 # clawbell 0.1.1 — native Linux releases and explicit host installation
 
 - Package x86-64 and AArch64 separately, with architecture-specific CycloneDX SBOM,

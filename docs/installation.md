@@ -1,4 +1,13 @@
-# Source installation and recovery
+# Installation and recovery
+
+For a quick offline CLI trial, use the authenticated binary installer described in
+[README](../README.md#try-a-release-without-compiling). It installs only an exact
+release binary, under a 55-second deadline, after checksum and two attestation
+checks. No archive paths are extracted. Failed verification never executes the
+binary or installs it. This does not enable firewall protection for a client.
+The source installer below remains necessary for host provisioning and binding.
+
+# Source installation
 
 Use a reviewed source checkout, Bash, an unprivileged owner with sudo access,
 HTTPS connectivity and an existing strict JSON client configuration. The installer

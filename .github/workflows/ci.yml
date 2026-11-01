@@ -222,3 +222,8 @@ jobs:
             gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" --source-ref "refs/tags/$RELEASE_TAG" --source-digest "$GITHUB_SHA" --predicate-type https://cyclonedx.org/bom
           done
           gh release create "$RELEASE_TAG" release/* --verify-tag --title "clawbell $version MVP" --notes-file docs/release-notes.md
+      - name: Verify the public installation path against published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/install-release.py --version "${RELEASE_TAG#v}"

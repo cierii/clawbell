@@ -66,3 +66,22 @@ MCP Context7 consulted official [GitHub Actions attestation documentation](https
 and [Docker resource/lifecycle options](https://github.com/docker/docs/blob/main/data/cli/engine/docker_run.yaml).
 The documented Docker controls are necessary inputs to a future adapter, not
 evidence that a portable production runner already exists.
+
+## Verified binary trial (0.1.2)
+
+The separate `scripts/install-release.py` entry point downloads an exact tagged
+Linux archive through GitHub CLI. It verifies the archive SHA-256 and both the
+existing workflow provenance and CycloneDX attestation against the exact tag
+before parsing or executing it. Authentication requires the configured GitHub
+trust root; a checksum alone is insufficient. No archive paths are extracted: a
+single bounded regular binary member is read, checked with version/help/offline
+scan and installed exclusively in the owner's private version directory. Existing
+different files refuse replacement. Both verification and all child commands have
+deadlines, with a 55-second overall deadline and no fallback.
+
+This entry point does not provision namespaces/cgroups, bind clients, accept pins,
+change policies or grant tool execution. The source installer and native preflight
+remain necessary for client protection. No sub-minute promise is made for complete
+host provisioning or slow networks. Installation requires published assets, not
+merely a tag or a successful main-branch build. Tests exercise failed checksum,
+provenance/SBOM, wrong version and archive-link refusal before installation.

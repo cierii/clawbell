@@ -15,7 +15,7 @@ test ! -e "target/package/$name"
 bash scripts/generate-sbom.sh
 mkdir -p "target/package/$name"
 install -m 0755 target/release/clawbell "target/package/$name/clawbell"
-install -m 0644 LICENSE SECURITY.md AGENTS.md target/package/clawbell.cdx.json "target/package/$name/"
+install -m 0644 LICENSE SECURITY.md CONTRIBUTING.md AGENTS.md target/package/clawbell.cdx.json "target/package/$name/"
 install -m 0644 README.md "target/package/$name/README.md"
 mkdir -p "target/package/$name/policies"
 install -m 0644 policies/default.toml "target/package/$name/policies/default.toml"

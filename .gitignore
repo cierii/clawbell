@@ -53,3 +53,21 @@ oauth-*.lease
 # Local Python verification bytecode
 __pycache__/
 *.pyc
+
+# Local assistant configuration, credentials, diagnostics and release downloads
+/.agents/
+/.codex/
+/.aws/
+/.ssh/
+/.cursor/
+*.log
+*.core
+core.[0-9]*
+*.tar.gz
+*.zip
+*.token
+*.credential
+*.credentials
+# Owner notes already present before the publication audit
+/docs/audyt-mvp-i-rynku-2026-10-30.md
+/docs/uruchomienie-mvp.md

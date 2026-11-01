@@ -6,6 +6,22 @@ pinned tool schemas, session DLP, durable SQLite audit and native containment.
 It runs without cloud telemetry. It is a conservative security boundary, not a
 claim to recognize every malicious instruction or arbitrary encoded secret.
 
+## Try a release without compiling
+
+From a reviewed checkout, with Python 3.11+ and GitHub CLI installed/authenticated:
+
+```bash
+python3 scripts/install-release.py --version 0.1.2
+```
+
+This downloads the exact Linux release, verifies its checksum, GitHub build
+provenance and SBOM attestation, runs offline version/help/scan checks, and installs
+`~/.local/share/clawbell/releases/0.1.2/clawbell`. The whole command has a 55-second
+deadline and refuses on slow downloads or failed verification. It requires the
+published release assets; a tag alone is insufficient. It does not provision the
+host or bind clients. Full protection needs the host setup below, which downloads
+and compiles dependencies and can take several minutes. Windows/macOS are refused.
+
 ## Install and bind a client
 
 For a reviewed source checkout on Fedora 44 or Ubuntu 24.04, one invocation
